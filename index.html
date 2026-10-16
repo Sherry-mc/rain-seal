@@ -1,0 +1,1872 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>雨中的小海豹 · 钢笔淡彩</title>
+<style>
+  html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#f3ecdd;}
+  /* 禁文本选择 / 长按呼出 / 拖拽选中：拖动手势不再触发蓝色选中层 */
+  html,body,canvas,*{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-user-drag:none;}
+  canvas{display:block;width:100vw;height:100vh;cursor:grab;touch-action:none;}
+  canvas:active{cursor:grabbing;}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+"use strict";
+/* ============================================================
+   雨中小海豹 · 三渲二 / 钢笔淡彩
+   自定义迷你 3D 引擎：画家算法 + 手绘笔触，纯 Canvas 2D，零依赖
+   整块即水：无池壁边沿，一块半透明的蓝色水体
+   海豹按水面切两半：水下部分先画（隔着水色），出水部分后画（在涟漪之上）
+   ============================================================ */
+
+/* ---------- 小工具 ---------- */
+const TAU = Math.PI * 2;
+const rnd = (a, b) => a + Math.random() * (b - a);
+const sub = (a, b) => [a[0]-b[0], a[1]-b[1], a[2]-b[2]];
+const cross = (a, b) => [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+const dot = (a, b) => a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+const norm3 = a => { const l = Math.hypot(a[0],a[1],a[2]) || 1; return [a[0]/l,a[1]/l,a[2]/l]; };
+function hash(n){ const s = Math.sin(n) * 43758.5453; return s - Math.floor(s); }
+
+/* ---------- 调色板（莫兰迪低饱和 + 钢笔深褐墨） ---------- */
+const INK      = [62, 48, 38];        // 深褐钢笔墨
+const PAPER    = [243, 236, 221];     // 米色纸
+const SHADOW_C = [115, 128, 136];
+
+/* ---------- 主题色系（莫兰迪低饱和） ---------- */
+/* W 水面主色 / LT 亮部 / DK 暗部 / RAIN 雨丝三阶 / SP_D 深色水花·涟漪 / SP_W 白色 */
+const THEMES = [
+  { name:'墨黑', W:[48,50,54], LT:[66,69,74], DK:[34,36,40],
+    RAIN:[[178,182,186],[190,194,198],[165,169,174]],
+    SP_D:[190,193,197], SP_W:[250,251,253], topA:0.85, sideA:0.45 },
+  { name:'透白', W:[240,243,241], LT:[248,250,248], DK:[219,226,222],
+    RAIN:[[203,210,205],[212,217,212],[193,201,196]],
+    SP_D:[214,221,216], SP_W:[253,254,252], topA:0.55, sideA:0.32 },
+  { name:'雨蓝', W:[168,190,200], LT:[199,215,223], DK:[143,167,178],
+    RAIN:[[120,148,162],[133,158,170],[108,136,151]],
+    SP_D:[100,134,150], SP_W:[251,252,250], topA:0.82, sideA:0.42 },
+  { name:'浅绿', W:[172,190,173], LT:[202,216,202], DK:[146,166,148],
+    RAIN:[[123,144,124],[135,153,134],[110,132,111]],
+    SP_D:[103,127,106], SP_W:[250,252,249], topA:0.80, sideA:0.40 },
+  { name:'浅粉', W:[213,187,192], LT:[228,208,212], DK:[187,159,165],
+    RAIN:[[164,138,143],[175,149,154],[151,126,132]],
+    SP_D:[151,117,124], SP_W:[252,250,250], topA:0.78, sideA:0.40 },
+  { name:'灰紫', W:[193,188,203], LT:[212,208,222], DK:[167,161,180],
+    RAIN:[[149,142,162],[160,153,172],[136,129,150]],
+    SP_D:[138,129,155], SP_W:[252,251,253], topA:0.78, sideA:0.40 },
+  { name:'浅金', W:[240,222,164], LT:[250,238,196], DK:[220,200,140],
+    RAIN:[[208,188,128],[216,196,136],[198,178,120]],
+    SP_D:[198,175,115], SP_W:[255,254,247], topA:0.78, sideA:0.40 },
+];
+let themeIdx = 2;
+let pal = THEMES[themeIdx];
+let waterFrom = THEMES[themeIdx];
+let waterTo   = THEMES[themeIdx];
+let waterT    = 1;
+const WATER_DUR = 1.7;
+const lerpN = (a, b, t) => a + (b - a) * t;
+const lerpC = (a, b, t) => [lerpN(a[0],b[0],t), lerpN(a[1],b[1],t), lerpN(a[2],b[2],t)];
+const mixC  = (a, b, t) => lerpC(a, b, t);
+const easeW = t => 1 - Math.pow(1 - t, 3);
+function curWaterPal(){
+  if (waterT >= 1) return waterTo;
+  const e = easeW(waterT);
+  return {
+    W:  lerpC(waterFrom.W,  waterTo.W,  e),
+    LT: lerpC(waterFrom.LT, waterTo.LT, e),
+    DK: lerpC(waterFrom.DK, waterTo.DK, e),
+    topA:  lerpN(waterFrom.topA,  waterTo.topA,  e),
+    sideA: lerpN(waterFrom.sideA, waterTo.sideA, e),
+  };
+}
+const blobCol     = (P, kind) => kind === 0 ? P.LT : (kind === 1 ? P.DK : mixC(P.W, P.LT, 0.5));
+const sideBlobCol = (P, kind) => kind === 1 ? P.DK : mixC(P.W, P.LT, 0.55);
+
+let paintBlob = null;
+function makePaintBlob(){
+  const n = 30, pts = [];
+  let o = 0;
+  for (let k = 0; k < n; k++){
+    const a = k/n*TAU;
+    o = o*0.55 + rnd(-0.1, 0.1);
+    const r = 1 + o;
+    pts.push([Math.cos(a)*r, Math.sin(a)*r]);
+  }
+  pts.push(pts[0]);
+  paintBlob = pts;
+}
+function switchTheme(i){
+  if (i === themeIdx || i < 0 || i >= THEMES.length) return;
+  waterFrom = curWaterPal();
+  themeIdx = i;
+  pal = THEMES[i];
+  waterTo = THEMES[i];
+  waterT = 0;
+  makePaintBlob();
+}
+
+/* ---------- 画布 ---------- */
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+const FOV = 38 * Math.PI / 180;
+let W = 0, H = 0, DPR = 1, focal = 600;
+
+let SC = 1, SATOP = 0, SABOT = 0;
+let _safeProbe = null;
+function readSafeArea(){
+  if (!_safeProbe){
+    _safeProbe = document.createElement('div');
+    _safeProbe.style.cssText = 'position:fixed;top:0;left:0;height:0;width:0;visibility:hidden;'
+      + 'padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom);';
+    document.body.appendChild(_safeProbe);
+  }
+  const cs = getComputedStyle(_safeProbe);
+  SATOP = parseFloat(cs.paddingTop) || 0;
+  SABOT = parseFloat(cs.paddingBottom) || 0;
+}
+function resize(){
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = Math.round(W * DPR);
+  cv.height = Math.round(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  SC = Math.max(1, Math.min(1.5, Math.min(W, H) / 430));
+  readSafeArea();
+  focal = (Math.min(W, H) * 0.5) / Math.tan(FOV / 2);
+  makePaper();
+}
+
+/* ---------- 相机（第三视角轨道） ---------- */
+const cam = { theta: 0.62, phi: 1.02, dist: 5.4, ty: -0.12 };
+let eye = [0,0,5], Fv = [0,0,-1], Rv = [1,0,0], Uv = [0,1,0];
+function updCam(){
+  const sp = Math.sin(cam.phi), cp = Math.cos(cam.phi);
+  eye = [cam.dist*sp*Math.sin(cam.theta), cam.ty + cam.dist*cp, cam.dist*sp*Math.cos(cam.theta)];
+  const tgt = [0, cam.ty, 0];
+  Fv = norm3(sub(tgt, eye));
+  Rv = norm3(cross(Fv, [0,1,0]));
+  Uv = cross(Rv, Fv);
+}
+function proj(p){
+  const v = sub(p, eye);
+  const d = dot(v, Fv);
+  if (d < 0.15) return null;
+  return [W/2 + dot(v, Rv)/d*focal, H/2 - dot(v, Uv)/d*focal, d];
+}
+const depthOf = p => dot(sub(p, eye), Fv);
+
+/* ---------- 几何常量（整块即水：无池壁、无边沿） ---------- */
+const OH = 1.15, WH = 1.15;
+const TOP = 0, BOT = -0.55, WY = 0;
+const co = [[ OH,TOP, OH],[ OH,TOP,-OH],[-OH,TOP,-OH],[-OH,TOP, OH]];
+const cb = co.map(p => [p[0], BOT, p[2]]);
+const wi = [[ WH, WY, WH],[ WH, WY,-WH],[-WH, WY,-WH],[-WH, WY, WH]];
+
+/* ---------- 纸纹背景（一次性生成） ---------- */
+const paper = document.createElement('canvas');
+function makePaper(){
+  const pw = Math.max(2, Math.round(W * DPR)), ph = Math.max(2, Math.round(H * DPR));
+  paper.width = pw; paper.height = ph;
+  const p = paper.getContext('2d');
+  p.setTransform(DPR, 0, 0, DPR, 0, 0);
+  p.fillStyle = `rgb(${PAPER[0]},${PAPER[1]},${PAPER[2]})`;
+  p.fillRect(0, 0, W, H);
+  for (let i = 0; i < 14; i++){
+    const x = rnd(0, W), y = rnd(0, H), r = rnd(60, 240)*SC;
+    const g = p.createRadialGradient(x, y, 0, x, y, r);
+    const warm = Math.random() < 0.5 ? '214,199,172' : '233,226,209';
+    g.addColorStop(0, `rgba(${warm},0.045)`);
+    g.addColorStop(1, `rgba(${warm},0)`);
+    p.fillStyle = g;
+    p.fillRect(x-r, y-r, r*2, r*2);
+  }
+  const id = p.getImageData(0, 0, pw, ph), d = id.data;
+  for (let i = 0; i < d.length; i += 4){
+    const n = (Math.random() - 0.5) * 11;
+    d[i] += n; d[i+1] += n * 0.95; d[i+2] += n * 0.85;
+  }
+  p.putImageData(id, 0, 0);
+  p.lineCap = 'round';
+  for (let i = 0; i < pw * ph / 1500; i++){
+    const x = rnd(0, W), y = rnd(0, H);
+    const a = rnd(0, TAU), l = rnd(5, 13)*SC;
+    p.strokeStyle = `rgba(${Math.random()<0.5?'196,182,156':'232,224,204'},${rnd(0.05,0.1)})`;
+    p.lineWidth = rnd(0.5, 1.1)*SC;
+    p.beginPath();
+    p.moveTo(x, y);
+    p.lineTo(x + Math.cos(a)*l, y + Math.sin(a)*l);
+    p.stroke();
+  }
+  const vg = p.createRadialGradient(W/2, H/2, Math.min(W, H)*0.44,
+                                    W/2, H/2, Math.hypot(W, H)*0.6);
+  vg.addColorStop(0, 'rgba(198,182,152,0)');
+  vg.addColorStop(1, 'rgba(198,182,152,0.15)');
+  p.fillStyle = vg;
+  p.fillRect(0, 0, W, H);
+}
+
+/* ---------- 手绘笔触 ---------- */
+function pen(pts, ink, w, alpha, seed, gap, overdraw, jw, aw){
+  if (!pts || pts.length < 2) return;
+  w *= SC;
+  // jw / aw：宽度与浓淡的抖动幅度。放样轮廓是几十根短棱首尾相接，
+  // 抖动一大就变成一条粗细乱跳的毛虫，所以轮廓会显式把这两个值压小。
+  const J = jw === undefined ? 0.60 : jw;
+  const A = aw === undefined ? 0.34 : aw;
+  for (let i = 0; i < pts.length - 1; i++){
+    const h = hash(seed*13.7 + i*3.1);
+    if (gap && h < gap) continue;
+    ctx.strokeStyle = `rgba(${ink[0]},${ink[1]},${ink[2]},${Math.min(1, alpha*(1 - A/2 + A*h))})`;
+    ctx.lineWidth = w * (1 - J/2 + J * hash(seed + i*7.3));
+    ctx.beginPath();
+    ctx.moveTo(pts[i][0], pts[i][1]);
+    ctx.lineTo(pts[i+1][0], pts[i+1][1]);
+    ctx.stroke();
+  }
+  if (overdraw !== false){
+    ctx.strokeStyle = `rgba(${ink[0]},${ink[1]},${ink[2]},${alpha*0.26})`;
+    ctx.lineWidth = w * 0.5;
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0]+1.4*SC, pts[0][1]+1.0*SC);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0]+1.4*SC, pts[i][1]+1.0*SC);
+    ctx.stroke();
+  }
+}
+function fillPoly(pts, rgb, a, offset){
+  if (!pts || pts.length < 3) return;
+  ctx.beginPath();
+  ctx.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+  ctx.closePath();
+  ctx.fillStyle = `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${a})`;
+  ctx.fill();
+  if (offset){
+    ctx.save();
+    ctx.translate(2*SC, 1.4*SC);
+    ctx.fillStyle = `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${a*0.45})`;
+    ctx.fill();
+    ctx.restore();
+  }
+}
+function strokePoly(pts, rgb, a, w){
+  ctx.beginPath();
+  ctx.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+  ctx.closePath();
+  ctx.strokeStyle = `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${a})`;
+  ctx.lineWidth = w * SC;
+  ctx.stroke();
+}
+function clipQuad(q){
+  ctx.beginPath();
+  ctx.moveTo(q[0][0], q[0][1]);
+  for (let i = 1; i < q.length; i++) ctx.lineTo(q[i][0], q[i][1]);
+  ctx.closePath();
+  ctx.clip();
+}
+
+/* ---------- 抖动边缘（局部坐标固定 → 每帧投影，不闪烁） ---------- */
+function wobblePts(a, b, segs, amp){
+  const d = norm3(sub(b, a));
+  const p1 = Math.abs(d[1]) > 0.9 ? [1,0,0] : norm3(cross(d, [0,1,0]));
+  const p2 = norm3(cross(d, p1));
+  const pts = [];
+  let o1 = 0, o2 = 0;
+  for (let i = 0; i <= segs; i++){
+    const t = i / segs;
+    o1 = o1*0.55 + rnd(-amp, amp);
+    o2 = o2*0.55 + rnd(-amp, amp);
+    const s = Math.pow(Math.sin(Math.PI*t), 0.6);
+    const bx = a[0]+(b[0]-a[0])*t, by = a[1]+(b[1]-a[1])*t, bz = a[2]+(b[2]-a[2])*t;
+    pts.push([bx+(p1[0]*o1+p2[0]*o2)*s, by+(p1[1]*o1+p2[1]*o2)*s, bz+(p1[2]*o1+p2[2]*o2)*s]);
+  }
+  return pts;
+}
+
+/* ---------- 底座边（预生成抖动钢笔线） ---------- */
+const edgeDefs = [];
+(function(){
+  const amp = 0.013, segs = 12;
+  for (let i = 0; i < 4; i++){
+    const j = (i+1)%4;
+    edgeDefs.push({ a: co[i], b: co[j], id: 't'+i, w: 1.9, al: 0.88, grp: 'top' });
+    edgeDefs.push({ a: cb[i], b: cb[j], id: 'b'+i, w: 1.4, al: 0.62, grp: 'bot', side: i });
+    edgeDefs.push({ a: co[i], b: cb[i], id: 'v'+i, w: 1.5, al: 0.72, grp: 'ver', side: [i, (i+3)%4] });
+  }
+  for (const e of edgeDefs) e.pts = wobblePts(e.a, e.b, segs, amp);
+})();
+
+/* ---------- 侧壁水彩装饰（局部坐标预生成） ---------- */
+function sideBasis(i){
+  const j = (i+1)%4;
+  const A = co[i], E1 = sub(co[j], co[i]), E2 = sub(cb[i], co[i]);
+  return { A, E1, E2, L1: Math.hypot(E1[0],E1[1],E1[2]), L2: Math.hypot(E2[0],E2[1],E2[2]) };
+}
+const sideDecos = [];
+for (let i = 0; i < 4; i++){
+  const { A, E1, E2, L1, L2 } = sideBasis(i);
+  const blobs = [];
+  for (let b = 0; b < 5; b++){
+    const uc = rnd(0.12, 0.88), vc = rnd(0.1, 0.85), r = rnd(0.1, 0.3), n = 7;
+    const pts = [];
+    let o = 0;
+    for (let k = 0; k < n; k++){
+      const a = k/n*TAU;
+      o = o*0.5 + rnd(-0.25, 0.25);
+      const rr = r*(1+o);
+      pts.push([ A[0]+E1[0]*(uc+Math.cos(a)*rr/L1)+E2[0]*(vc+Math.sin(a)*rr/L2),
+                 A[1]+E1[1]*(uc+Math.cos(a)*rr/L1)+E2[1]*(vc+Math.sin(a)*rr/L2),
+                 A[2]+E1[2]*(uc+Math.cos(a)*rr/L1)+E2[2]*(vc+Math.sin(a)*rr/L2) ]);
+    }
+    blobs.push({ pts, kind: b % 2, a: rnd(0.08, 0.17) });
+  }
+  const hatches = [];
+  for (let h = 0; h < 7; h++){
+    const u = rnd(0.08, 0.92), v = rnd(0.66, 0.97), l1 = rnd(0.1, 0.22), l2 = rnd(0.05, 0.12);
+    hatches.push([
+      [ A[0]+E1[0]*u+E2[0]*v, A[1]+E1[1]*u+E2[1]*v, A[2]+E1[2]*u+E2[2]*v ],
+      [ A[0]+E1[0]*(u+l1)+E2[0]*(v+l2), A[1]+E1[1]*(u+l1)+E2[1]*(v+l2), A[2]+E1[2]*(u+l1)+E2[2]*(v+l2) ]
+    ]);
+  }
+  sideDecos.push({ blobs, hatches });
+}
+const waterBlobs = [];
+for (let b = 0; b < 9; b++){
+  const cx = rnd(-0.75, 0.75), cz = rnd(-0.75, 0.75), r = rnd(0.16, 0.42), n = 8;
+  const pts = [];
+  let o = 0;
+  for (let k = 0; k < n; k++){
+    const a = k/n*TAU;
+    o = o*0.5 + rnd(-0.28, 0.28);
+    const rr = r*(1+o);
+    pts.push([cx+Math.cos(a)*rr, WY+0.001, cz+Math.sin(a)*rr]);
+  }
+  const kind = b % 3;
+  waterBlobs.push({ pts, kind, a: kind===1 ? rnd(0.10,0.17) : rnd(0.16,0.28) });
+}
+const waterSpecks = [];
+for (let i = 0; i < 30; i++) waterSpecks.push([rnd(-0.95,0.95), rnd(-0.95,0.95)]);
+
+/* ---------- 雨 ---------- */
+const wind = norm3([0.30, -1, 0.13]);
+const drops = [];
+const NDROP = 85;
+function respawn(d, first){
+  let lx, lz;
+  if (Math.random() < 0.88){ lx = rnd(-OH, OH); lz = rnd(-OH, OH); }
+  else { lx = rnd(-OH-0.16, OH+0.16); lz = rnd(-OH-0.16, OH+0.16); }
+  d.y = WY + (first ? rnd(0, 2.6) : rnd(1.8, 2.8));
+  const k = (d.y - WY) / -wind[1];
+  d.x = lx - wind[0]*k;
+  d.z = lz - wind[2]*k;
+  d.spd = rnd(3.3, 5.0);
+  d.len = rnd(0.30, 0.48);
+  d.c = pal.RAIN[(Math.random()*3)|0];
+  d.w = rnd(1.1, 1.8);
+  d.a = rnd(0.45, 0.7);
+}
+for (let i = 0; i < NDROP; i++){ const d = { id: i }; respawn(d, true); drops.push(d); }
+
+/* ---------- 涟漪 / 水花 ---------- */
+const ripples = [];
+const splashes = [];
+function addRipple(cx, cz, big){
+  const nRings = big ? 3 : (Math.random() < 0.55 ? 2 : 1);
+  const rings = [];
+  for (let k = 0; k < nRings; k++){
+    const jit = [];
+    for (let j = 0; j < 18; j++) jit.push([rnd(0, 0.35), rnd(-0.12, 0.12)]);
+    rings.push({ delay: k*rnd(0.12, 0.2),
+      maxR: (big ? [0.34, 0.24, 0.15] : [rnd(0.10, 0.22), rnd(0.06, 0.13), 0.05])[k] || 0.05,
+      jit, w: big ? rnd(1.8, 2.4) : rnd(1.4, 2.0),
+      c: Math.random() < 0.6 ? pal.SP_D : pal.SP_W });
+  }
+  ripples.push({ cx, cz, t: 0, life: big ? rnd(1.7, 2.2) : rnd(1.0, 1.6), rings, seed: Math.random()*1000 });
+  while (ripples.length > 46){
+    const i = ripples.findIndex(r => !r.tap);
+    if (i < 0) break;
+    ripples.splice(i, 1);
+  }
+}
+function addTapRipple(cx, cz){
+  const rings = [];
+  const base = rnd(0.50, 0.62);
+  const gd = rnd(1.0, 1.2);
+  let end = gd;
+  const mkRing = (delay, maxR, am) => {
+    const jit = [];
+    for (let j = 0; j < 18; j++) jit.push([rnd(0, 0.35), rnd(-0.12, 0.12)]);
+    end = Math.max(end, delay + gd);
+    return { delay, maxR, jit, w: rnd(1.8, 2.4), am, growD: gd, c: pal.SP_W, hits: new Set() };
+  };
+  rings.push(mkRing(0, base, rnd(0.5, 0.65)));
+  if (Math.random() < 0.8) rings.push(mkRing(gd*rnd(0.35, 0.5), base*rnd(0.5, 0.65), rnd(0.3, 0.42)));
+  ripples.push({ cx, cz, t: 0, life: end, rings, seed: Math.random()*1000, tap: true });
+  if (ripples.filter(r => r.tap).length > 8){
+    const i = ripples.findIndex(r => r.tap);
+    if (i >= 0) ripples.splice(i, 1);
+  }
+}
+function addSplash(x, z, n, sy){
+  for (let i = 0; i < n; i++){
+    const a = rnd(0, TAU);
+    splashes.push({ x, y: sy !== undefined ? sy : WY+0.012, z,
+      vx: Math.cos(a)*rnd(0.15, 0.6), vy: rnd(0.7, 1.7), vz: Math.sin(a)*rnd(0.15, 0.6),
+      t: 0, life: rnd(0.28, 0.5), r: rnd(1.0, 2.4),
+      white: Math.random() < 0.55 });
+  }
+}
+/* 落在「东西上」的水花：荷叶 / 海豹背 —— pad:true → 画在最上层，不被盖住 */
+function addTopSplash(x, z, sy){
+  const n = 3 + (Math.random()*4|0);
+  for (let i = 0; i < n; i++){
+    const a = rnd(0, TAU);
+    splashes.push({ x, y: sy, z, pad: true,
+      vx: Math.cos(a)*rnd(0.3, 0.95), vy: rnd(1.0, 2.1), vz: Math.sin(a)*rnd(0.3, 0.95),
+      t: 0, life: rnd(0.32, 0.58), r: rnd(2.0, 3.6),
+      white: Math.random() < 0.85 });
+  }
+}
+
+/* ============================================================
+   海豹：真网格（放样躯干 + 球头 + 吻部 + 前鳍 + 尾鳍）
+   ============================================================ */
+/* 形体全部由用户给的三视图反推（见 /tmp/buildtable.js）：
+   局部坐标里「总长 = 1.0」，x: −0.5 尾鳍尖 → +0.5 鼻尖，y = 0 就是腹底。
+   三视图量出来的比例：高/总长 = 0.783，宽/总长 = 0.604 */
+const SEAL_S = 0.80;          // 世界缩放
+const SEAL_Y = -0.038;        // 出水线：腹线略沉，整只趴在水面上（同参考鸭的处理）
+const SEAL_PITCH = 0.015;     // 抬头角：三视图里姿态已经是平的，只留一点让头稍抬
+const SV = [], SF = [];
+(function buildSeal(){
+  const add = (x, y, z) => { SV.push([x, y, z]); return SV.length - 1; };
+
+  /* --- 躯干：一条连续放样，从尾尖一路贯到吻尖 ---
+     头 / 颈 / 肩 / 尾根全落在这同一条轮廓线上：没有球块插进去，
+     也就没有脖子接缝、没有假轮廓环，不需要再去「藏」穿模的面 */
+  /* 29 环，逐环来自「侧视取上/下缘 → CY/RY，俯视取左右缘 → RZ」 */
+  const X  = [-0.295,-0.267,-0.238,-0.210,-0.181,-0.153,-0.125,-0.096,-0.068,-0.039,-0.011, 0.017, 0.046, 0.074, 0.103, 0.131, 0.159, 0.188, 0.216, 0.244, 0.273, 0.301, 0.330, 0.358, 0.386, 0.415, 0.443, 0.472, 0.500];
+  const CY = [ 0.173, 0.199, 0.212, 0.224, 0.234, 0.252, 0.278, 0.307, 0.332, 0.349, 0.362, 0.372, 0.380, 0.386, 0.390, 0.392, 0.395, 0.398, 0.400, 0.401, 0.402, 0.402, 0.400, 0.396, 0.388, 0.427, 0.465, 0.509, 0.490];
+  const RY = [ 0.101, 0.162, 0.181, 0.198, 0.214, 0.234, 0.264, 0.297, 0.325, 0.343, 0.356, 0.366, 0.374, 0.380, 0.384, 0.386, 0.387, 0.386, 0.382, 0.376, 0.368, 0.356, 0.345, 0.332, 0.315, 0.242, 0.158, 0.064, 0.022];
+  const RZ = [ 0.138, 0.186, 0.199, 0.210, 0.225, 0.237, 0.247, 0.256, 0.263, 0.268, 0.272, 0.278, 0.288, 0.297, 0.302, 0.300, 0.294, 0.281, 0.269, 0.257, 0.250, 0.240, 0.228, 0.214, 0.197, 0.174, 0.158, 0.134, 0.040];
+  const NA = 26, NL = X.length, rings = [];
+  for (let i = 0; i < NL; i++){
+    const ring = [];
+    for (let j = 0; j <= NA; j++){
+      const t = j/NA*TAU;
+      ring.push(add(X[i], CY[i] + RY[i]*Math.sin(t), RZ[i]*Math.cos(t)));
+    }
+    rings.push(ring);
+  }
+  for (let i = 0; i < NL - 1; i++)
+    for (let j = 0; j < NA; j++)
+      SF.push({ v:[rings[i][j], rings[i][j+1], rings[i+1][j+1], rings[i+1][j]], kind:'body',
+        ref:[(X[i]+X[i+1])/2, (CY[i]+CY[i+1])/2, 0] });
+  const capT = add(X[0]-0.012, CY[0]-0.004, 0), capF = add(X[NL-1]+0.012, CY[NL-1]+0.004, 0);
+  for (let j = 0; j < NA; j++){
+    SF.push({ v:[rings[0][j], capT, rings[0][j+1]], kind:'body', ref:[X[0], CY[0], 0], cap:true });
+    SF.push({ v:[rings[NL-1][j], rings[NL-1][j+1], capF], kind:'body', ref:[X[NL-1], CY[NL-1], 0], cap:true });
+  }
+  /* 在放样面上取点：给定轴向位置 x 与环向角 th → 表面点 + 外法线 */
+  function loftAt(x, th){
+    let i = 0;
+    while (i < NL - 2 && x > X[i+1]) i++;
+    const t = (x - X[i]) / (X[i+1] - X[i]);
+    const L = (a, b) => a + (b - a)*t;
+    const cy = L(CY[i], CY[i+1]), ry = L(RY[i], RY[i+1]), rz = L(RZ[i], RZ[i+1]);
+    return [ [x, cy + ry*Math.sin(th), rz*Math.cos(th)],
+             norm3([0, Math.sin(th)/Math.max(ry, 1e-4), Math.cos(th)/Math.max(rz, 1e-4)]) ];
+  }
+
+  /* 这个点在身体里面吗？（用于"埋进身体那截不描线"）
+     —— 尾鳍根部有一小段塞在身体里，那段绝不能描线，否则体侧会横着多出一道墨线。 */
+  function inBody(x, y, z, m){
+    if (x > X[NL-1] || x < X[0]) return false;
+    let i = 0; while (i < NL - 2 && x > X[i+1]) i++;
+    const t = (x - X[i])/(X[i+1] - X[i]);
+    const L = (a, b) => a + (b - a)*t;
+    const dy = (y - L(CY[i], CY[i+1]))/Math.max(1e-4, L(RY[i], RY[i+1]) + m);
+    const dz = z/Math.max(1e-4, L(RZ[i], RZ[i+1]) + m);
+    return dy*dy + dz*dz < 1;
+  }
+
+  /* --- 眼 / 鼻：贴在放样面上的小圆片（用 loftAt 取点，既不浮空也不陷进去） --- */
+  function disc(c, n, r, kind, hl){
+    const a1 = norm3(cross([0,1,0], n)), a2 = cross(n, a1), v = [];
+    for (let j = 0; j < 7; j++){
+      const t = j/7*TAU, ct = Math.cos(t), st = Math.sin(t);
+      v.push(add(c[0] + (a1[0]*ct + a2[0]*st)*r,
+                 c[1] + (a1[1]*ct + a2[1]*st)*r,
+                 c[2] + (a1[2]*ct + a2[2]*st)*r));
+    }
+    SF.push({ v, kind, rr: r, hl: !!hl, ref:[c[0] - n[0]*0.05, c[1] - n[1]*0.05, c[2] - n[2]*0.05] });
+  }
+  /* 眼：把参考侧视图做连通域量出来的位置 —— 眼心 = (0.340, 0.550)（局部总长单位）。
+     高度（y）与轴向（x）照量出来的数走，**横向（z）往里收 0.70**：
+     贴在赤道线上的话，俯视投影恰好压在轮廓边缘上、还会被透视推到轮廓外面去，
+     看起来就是"眼睛凸出体外"。收进去之后俯视时眼睛稳稳落在轮廓里。
+     侧视看的是 (x, y)，所以收 z 完全不影响侧影里的位置。 */
+  {
+    const [ep, en] = loftAt(0.352, 0.458);
+    for (const sgn of [1, -1])
+      disc([ep[0], ep[1], ep[2]*0.62*sgn], norm3([en[0], en[1], en[2]*sgn]), 0.024, 'eye', true);
+  }
+  /* 口鼻：同一个量法得到 吻端灰块中心 ≈ (0.43, 0.50)。
+     它必须长在「正前方」——侧视要看得见、正视要居中，所以不能用体表的环向角取点
+     （那样会跑到体侧去），直接放在吻端、法线朝前；屏幕上画成横向的椭圆。
+     x 收到 0.414（鼻尖在 0.5）：贴着鼻尖的话，俯视时透视会把它推到轮廓右端外面，
+     变成一块"飘在鼻子前面的灰斑"。可见性在 sealFaces 里单独放宽。 */
+  disc([0.414, 0.494, 0], norm3([1, 0.26, 0]), 0.046, 'muzzle', false);
+
+  /* 腹部取点：给 (x, y) → 体表点 + 外法线（y 越界会被钳到腹中线 z=0） */
+  function bellyAt(x, y){
+    let i = 0; while (i < NL - 2 && x > X[i+1]) i++;
+    const t = (x - X[i])/(X[i+1] - X[i]);
+    const L = (a, b) => a + (b - a)*t;
+    const cy = L(CY[i], CY[i+1]), ry = L(RY[i], RY[i+1]), rz = L(RZ[i], RZ[i+1]);
+    const s = Math.max(-1, Math.min(1, (y - cy)/Math.max(ry, 1e-4)));
+    const ct = Math.cos(Math.asin(s));
+    return [ [x, cy + ry*s, rz*ct],
+             norm3([0, s/Math.max(ry, 1e-4), ct/Math.max(rz, 1e-4)]) ];
+  }
+
+  /* --- 通用「椭球小块」：中心 + 三条互相垂直的半轴向量 ---
+     按「环 + 两端帽点」铺面 —— 跟躯干同一套拓扑，两端不会缺轮廓、也没有缺口。
+     椭球是凸体，可见面并成一条路径填一次就无缝。
+     u 是「长轴」（首尾方向），v/w 是两条横向半轴。 --- */
+  function blob(c, u, v, w, NR, NC, kind, ref, inner){
+    const rings = [];
+    /* 顶点必须进 SV 表（add 返回索引）—— 面里存的是索引，不是坐标 */
+    const P = (t1, t2, t3) =>
+      add(c[0] + t1[0] + t2[0] + t3[0],
+          c[1] + t1[1] + t2[1] + t3[1],
+          c[2] + t1[2] + t2[2] + t3[2]);
+    const sc3 = (a, s) => [a[0]*s, a[1]*s, a[2]*s];
+    for (let i = 1; i < NR; i++){
+      const ph = Math.PI*i/NR, sp = Math.sin(ph), cu = Math.cos(ph);
+      const row = [];
+      for (let k = 0; k <= NC; k++){
+        const th = TAU*k/NC;
+        /* p = c + u·cosφ + v·sinφ·sinθ + w·sinφ·cosθ */
+        row.push(P(sc3(u, cu), sc3(v, sp*Math.sin(th)), sc3(w, sp*Math.cos(th))));
+      }
+      rings.push(row);
+    }
+    const capA = add(c[0]+u[0], c[1]+u[1], c[2]+u[2]);
+    const capB = add(c[0]-u[0], c[1]-u[1], c[2]-u[2]);
+    for (let i = 0; i < rings.length - 1; i++)
+      for (let k = 0; k < NC; k++)
+        SF.push({ v:[rings[i][k], rings[i][k+1], rings[i+1][k+1], rings[i+1][k]],
+                  kind, ref, inner });
+    const last = rings[rings.length-1];
+    for (let k = 0; k < NC; k++){
+      SF.push({ v:[rings[0][k], capA, rings[0][k+1]], kind, ref, inner });
+      SF.push({ v:[last[k], last[k+1], capB], kind, ref, inner });
+    }
+  }
+
+  /* --- 尾鳍：一个「薄薄的椭圆体」。
+     之前做成左右两片桨叶，侧后视读出来是两片飘在身后的白薄片，不像尾巴。
+     现在是一个压扁的椭球（沿体轴长、竖直薄、横向中），用 blob() 建。 --- */
+  const TCX = -0.386, TCY = 0.150;
+  /* 竖直半径从 0.045 加到 0.062：0.045 时侧视只剩一条"纸片边"，
+     跟用户抱怨的"两个薄片"读起来还是一回事；加厚之后侧视是一枚圆润的扁鳍，
+     俯视宽度不变 —— 仍然是"薄薄的椭圆体"，只是不再薄到看不出体积。 */
+  blob([TCX, TCY, 0], [0.152, 0, 0], [0, 0.062, 0], [0, 0, 0.088],
+       8, 14, 'tail', [TCX, TCY, 0], false);
+
+  /* --- 前鳍（两只「手」）：真·三维小块，不是贴在体表的一圈线。
+     为什么必须做成实体：
+       · 贴在腹面上的闭合线在**正视**里是退化的 —— 正视的屏幕横坐标只跟 (y,z) 有关，
+         而腹面上一圈线的 (y,z) 由同一个椭圆决定，投影会塌成一条来回折的细线，
+         读出来是一团乱麻，不是"手"。
+       · 做成实体之后三个方向都有真实的二维投影，正视在身体底下左右各看到一只手。
+     姿态：根部扎在腹侧（局部 y≈0.145 那一圈的体表法线上），沿"下 + 略向外"伸出去。
+     尺寸是照三视图投影反推的：u 给正视的高度、w（带大 z 分量）给正视的宽度、
+     v（几乎沿体轴）给侧视的宽度。 --- */
+  for (const sg of [1, -1]){
+    const [rp, rn] = bellyAt(0.148, 0.148);
+    const n = norm3([rn[0], rn[1], rn[2]*sg]);            // 体表外法线（指下 + 向外）
+    const u = norm3([0.16, n[1]*0.42 - 0.92, n[2]*0.42]); // 长轴：向下为主、略向外
+    // 宽度轴几乎沿体轴（对 u 正交化）
+    const d = u[0];
+    const v = norm3([1 - u[0]*d, -u[1]*d, -u[2]*d]);
+    const w = cross(u, v);
+    const c = [rp[0] + u[0]*0.052, rp[1] + u[1]*0.052, rp[2]*sg + u[2]*0.052];
+    blob(c, [u[0]*0.074, u[1]*0.074, u[2]*0.074],
+            [v[0]*0.050, v[1]*0.050, v[2]*0.050],
+            [w[0]*0.032, w[1]*0.032, w[2]*0.032],
+         7, 12, 'fin', c, false);
+  }
+
+  /* 前鳍根部有一截扎在躯干里：把这部分面标记出来，描轮廓时跳过它们 ——
+     否则腹面上会多描出一圈"接缝"，看起来像贴了张圆膏药而不是长出来的鳍。 */
+  for (const f of SF){
+    if (f.kind !== 'fin') continue;
+    let cx = 0, cy = 0, cz = 0;
+    for (const vi of f.v){ const v = SV[vi]; cx += v[0]; cy += v[1]; cz += v[2]; }
+    const n = f.v.length;
+    f.inner = inBody(cx/n, cy/n, cz/n, -0.006);
+  }
+
+  /* --- 面索引（供侧影提取与稳定排序） --- */
+  SF.forEach((f, i) => { f.idx = i; });
+})();
+
+/* 侧影棱：可见面与不可见面共享的边 = 真实轮廓（只描轮廓，表面光滑） */
+const SEAL_E = [];
+(function(){
+  const m = new Map();
+  SF.forEach((f, i) => {
+    if (f.kind === 'eye' || f.kind === 'muzzle') return;
+    if (f.kind === 'tail' || f.kind === 'fin') return;   // 独立小块，各用各的边表
+    /* ⚠️ 端盖（吻尖 / 尾端的封口扇形）**必须**参与轮廓。
+       吻尖那一圈盖面法线几乎与体轴平行：侧视时它们整体是"背面"，
+       而紧挨着的环带面是"正面" —— 两个集合的交界正好落在盖面上。
+       把盖面排除在外，这段交界就没有边可采 → 鼻子那一段轮廓整段消失，
+       留下一道 ~25px 的缺口，填充的边缘直接怼在纸上，看着像"多长出一块白尖"。
+       （尾端的盖面被尾鳍椭球埋住，一起收进来也不会露出来。） */
+    for (let k = 0; k < f.v.length; k++){
+      const a = f.v[k], b = f.v[(k+1)%f.v.length];
+      const key = a < b ? a*100000 + b : b*100000 + a;
+      if (m.has(key)) m.get(key).f2 = i;
+      else m.set(key, { a: Math.min(a,b), b: Math.max(a,b), f1: i, f2: -1 });
+    }
+  });
+  for (const e of m.values()) SEAL_E.push(e);
+})();
+
+/* 独立小块（尾鳍 / 两只前鳍）各自的侧影棱。
+   它们不能和躯干共用一张边表：两块之间的边只属于其中一块，
+   混在一起会沿接缝描出一圈假轮廓。 */
+function buildSubEdges(kind){
+  const out = [], m = new Map();
+  SF.forEach((f, i) => {
+    if (f.kind !== kind) return;
+    for (let k = 0; k < f.v.length; k++){
+      const a = f.v[k], b = f.v[(k+1)%f.v.length];
+      if (a === b) continue;
+      const key = a < b ? a*100000 + b : b*100000 + a;
+      if (m.has(key)) m.get(key).f2 = i;
+      else m.set(key, { a: Math.min(a,b), b: Math.max(a,b), f1: i, f2: -1 });
+    }
+  });
+  for (const e of m.values()) out.push(e);
+  return out;
+}
+const SEAL_TE = buildSubEdges('tail');
+const SEAL_FE = buildSubEdges('fin');
+
+/* 局部 → 世界：先绕体轴横摇(roll)，再抬头(pitch)，最后绕世界 Y 偏航(yaw) */
+let _xCh = 1, _xSh = 0, _xCr = 1, _xSr = 0, _xCp = 1, _xSp = 0;
+function sealXfSet(h, pitch, roll){
+  _xCh = Math.cos(h);      _xSh = Math.sin(h);
+  _xCr = Math.cos(roll);   _xSr = Math.sin(roll);
+  _xCp = Math.cos(pitch);  _xSp = Math.sin(pitch);
+}
+function sealXf(v, wx, wy, wz, sc){
+  const y1 = v[1]*_xCr - v[2]*_xSr, z1 = v[1]*_xSr + v[2]*_xCr;
+  const x2 = v[0]*_xCp - y1*_xSp, y2 = v[0]*_xSp + y1*_xCp;
+  const lx = x2*SEAL_S*sc, ly = y2*SEAL_S*sc, lz = z1*SEAL_S*sc;
+  return [wx + lx*_xCh - lz*_xSh, wy + ly, wz + lx*_xSh + lz*_xCh];
+}
+/* 只做旋转（不平移）—— 给法线用；sg = -1 表示镜像到另一侧 */
+function sealXfN(v, sg){
+  const w0 = v[0], w1 = v[1], w2 = v[2]*sg;
+  const y1 = w1*_xCr - w2*_xSr, z1 = w1*_xSr + w2*_xCr;
+  const x2 = w0*_xCp - y1*_xSp, y2 = w0*_xSp + y1*_xCp;
+  return [x2*_xCh - z1*_xSh, y2, x2*_xSh + z1*_xCh];
+}
+
+/* 变换到世界 + 投影 + 画家排序（外向法线 → 连续受光） */
+function sealFaces(wx, wy, wz, h, pitch, roll, sc, projFn, vd, waterY){
+  sealXfSet(h, pitch, roll);
+  const list = [], rec = [];
+  for (const f of SF){
+    const P = [], W3 = [], wmap = {};
+    let depth = 0, ok = true;
+    for (const vi of f.v){
+      const p3 = sealXf(SV[vi], wx, wy, wz, sc);
+      const p = projFn(p3);
+      if (!p){ ok = false; break; }
+      W3.push(p3); P.push(p); depth += p[2];
+      wmap[vi] = p3;
+    }
+    if (!ok){ rec[f.idx] = null; continue; }
+    let nn = cross(sub(W3[1], W3[0]), sub(W3[2], W3[0]));
+    if (Math.hypot(nn[0],nn[1],nn[2]) < 1e-9) nn = [0,1,0];
+    nn = norm3(nn);
+    let fc = [0, 0, 0];
+    for (const p of W3){ fc[0]+=p[0]; fc[1]+=p[1]; fc[2]+=p[2]; }
+    fc = [fc[0]/W3.length, fc[1]/W3.length, fc[2]/W3.length];
+    const ref3 = sealXf(f.ref || [0, 0.05, 0], wx, wy, wz, sc);
+    if (dot(nn, sub(fc, ref3)) < 0) nn = [-nn[0], -nn[1], -nn[2]];
+    let d = depth/f.v.length;
+    if (f.kind === 'eye' || f.kind === 'muzzle') d -= 0.010;   // 贴片轻微前移，避免被头部盖住
+    const under = fc[1] < waterY;
+    // 水面切过这个面吗？切过就记下切口线段 —— 攒起来就是一圈手绘水线
+    let wline = null;
+    if (f.kind !== 'eye' && f.kind !== 'muzzle'){
+      const xs = [];
+      for (let k = 0; k < W3.length; k++){
+        const A = W3[k], B = W3[(k+1)%W3.length];
+        const da = A[1] - waterY, db = B[1] - waterY;
+        if ((da > 0) !== (db > 0)){
+          const t = da/(da - db);
+          xs.push([A[0]+(B[0]-A[0])*t, waterY, A[2]+(B[2]-A[2])*t]);
+        }
+      }
+      if (xs.length >= 2) wline = [xs[0], xs[1]];
+    }
+    // 吻尖的口鼻贴片是「朝正前方」的一小块：它在体表的最前端，侧视看过去法线几乎与视线垂直，
+    // 用常规的背面判据会时隐时现。这里改成判断「身体正前方是否朝着相机」。
+    // 可见性用「面 → 相机」的真实方向判（透视下比全局视线方向准得多），
+    // nv > 0 即法线朝着相机。
+    const nv = dot(nn, norm3(sub(eye, fc)));
+    const vis = f.kind === 'muzzle'
+      ? dot(norm3(sealXfN([1, 0, 0], 1)), vd) < 0.30
+      // 眼点的法线在正视时与视线几乎垂直，用常规背面判据会一只显一只不显
+      : (f.kind === 'eye' ? nv < 0.45 : nv > 0);
+    const it = { P, d, kind: f.kind, f, ny: nn[1], vis, nv, under, fc, wmap, wline,
+                 // 水平法线指向相机 = 这一面在水线的「近侧」。
+                 // 水线是一圈闭合曲线，远侧那半被身体挡着，不该画出来。
+                 near: (nn[0]*vd[0] + nn[2]*vd[2]) < 0 };
+    rec[f.idx] = it;
+    list.push(it);
+  }
+  list.sort((a, b) => (b.d - a.d) || (a.f.idx - b.f.idx));
+  /* --- 侧影棱 = 可见面与不可见面共享的边 ---
+     ⚠️ 这里**不能**再加"两侧 nv 都接近 0 就跳过"的护栏：
+     放样体的法线几乎垂直于体轴，所以"视线正对体轴"时整条轮廓上的两个面
+     nv 都 ≈ 0 —— 护栏恰好会把轮廓本身一段段滤掉（表现为轮廓断成好几段、
+     旁边还多出一截孤立的线）。nv 是解析算出来的连续量，
+     跨过 0 就翻转，本身不带噪声，不需要护栏。 */
+  const cand = [];
+  const collect = (E, key) => {
+    for (let i = 0; i < E.length; i++){
+      const e = E[i];
+      if (e.f2 < 0) continue;
+      const o1 = rec[e.f1], o2 = rec[e.f2];
+      if (!o1 || !o2 || o1.vis === o2.vis) continue;
+      const o = o1.vis ? o1 : o2;
+      if (o.wmap[e.a] && o.wmap[e.b]) cand.push({ o, va: e.a, vb: e.b, key });
+    }
+  };
+  collect(SEAL_E, 'edges');    // 身体
+  collect(SEAL_TE, 'tedges');  // 尾鳍椭球
+  collect(SEAL_FE, 'fedges');  // 两只前鳍
+
+  /* --- 剔除「压在身体里面」的假轮廓 ---
+     身体的可见面集合（法线朝相机那半边）的边界在有些机位会**打褶** ——
+     同一条轮廓附近出现第二条几乎平行的链。它其实落在身体投影的内部，
+     画出来就是身体旁边多出一撮乱线（正视时左下角那团"乱麻"）。
+     判据：这条棱的中点是否被某个**更近的可见身体面**盖住。
+     真的外轮廓永远在最外层，不会被任何面盖住，所以判据是安全的。
+     深度留 0.03 的余量：轮廓两侧的面深度几乎相等，不加余量会误杀真轮廓。 */
+  const occl = [];
+  for (const it of list){
+    if (!it.vis || it.kind !== 'body') continue;
+    let bx0 = 1e9, by0 = 1e9, bx1 = -1e9, by1 = -1e9;
+    for (const p of it.P){
+      if (p[0] < bx0) bx0 = p[0];
+      if (p[0] > bx1) bx1 = p[0];
+      if (p[1] < by0) by0 = p[1];
+      if (p[1] > by1) by1 = p[1];
+    }
+    it.bx0 = bx0; it.by0 = by0; it.bx1 = bx1; it.by1 = by1;
+    occl.push(it);
+  }
+  function ptInPoly(px, py, P){
+    let inside = false;
+    for (let i = 0, j = P.length - 1; i < P.length; j = i++){
+      const xi = P[i][0], yi = P[i][1], xj = P[j][0], yj = P[j][1];
+      if (((yi > py) !== (yj > py)) && (px < (xj - xi)*(py - yi)/(yj - yi) + xi))
+        inside = !inside;
+    }
+    return inside;
+  }
+  const kept = [];
+  for (const c of cand){
+    if (c.key !== 'edges'){ kept.push(c); continue; }
+    const A = projFn(c.o.wmap[c.va]), B = projFn(c.o.wmap[c.vb]);
+    if (!A || !B){ kept.push(c); continue; }
+    const mx = (A[0] + B[0])*0.5, my = (A[1] + B[1])*0.5, md = (A[2] + B[2])*0.5;
+    let hidden = false;
+    for (const it of occl){
+      if (it === c.o || it.d > md - 0.03) continue;
+      if (mx < it.bx0 || mx > it.bx1 || my < it.by0 || my > it.by1) continue;
+      if (ptInPoly(mx, my, it.P)){ hidden = true; break; }
+    }
+    if (!hidden) kept.push(c);
+  }
+
+  const wm = new Map();
+  for (const c of kept){
+    let m = wm.get(c.o);
+    if (!m){ m = {}; wm.set(c.o, m); }
+    (m[c.key] = m[c.key] || []).push({ a: c.o.wmap[c.va], b: c.o.wmap[c.vb],
+                                       seed: c.va*0.37 + c.vb*0.113 });
+  }
+  for (const [o, m] of wm) for (const k in m) o[k] = m[k];
+  return list;
+}
+
+/* 沿着一条侧影棱做确定性的三维抖动 + 投影
+   —— 用 hash 而不是 Math.random，抖动图案逐帧固定，边线不会闪 */
+function wobbleEdge(a, b, seed, segs, amp){
+  const d = norm3(sub(b, a));
+  const p1 = Math.abs(d[1]) > 0.9 ? [1,0,0] : norm3(cross(d, [0,1,0]));
+  const p2 = norm3(cross(d, p1));
+  const out = [];
+  let o1 = 0, o2 = 0;
+  for (let i = 0; i <= segs; i++){
+    const t = i/segs;
+    o1 = o1*0.5 + (hash(seed*7.1 + i*3.3) - 0.5)*2*amp;
+    o2 = o2*0.5 + (hash(seed*11.7 + i*5.9) - 0.5)*2*amp;
+    const s = Math.pow(Math.sin(Math.PI*t), 0.6);   // 端点收拢，保住棱角
+    const p = proj([ a[0]+(b[0]-a[0])*t + (p1[0]*o1+p2[0]*o2)*s,
+                     a[1]+(b[1]-a[1])*t + (p1[1]*o1+p2[1]*o2)*s,
+                     a[2]+(b[2]-a[2])*t + (p1[2]*o1+p2[2]*o2)*s ]);
+    if (!p) return [];
+    out.push(p);
+  }
+  return out;
+}
+
+/* ---------- 海豹上色 ----------
+   核心：这一层所有可见面并成「一条路径」只 fill 一次。
+   逐面 fill 时，相邻两面的公共边各被覆盖一半 → 露出背景，整只身上浮出一张网格。
+   并成一条路径后是真正的并集，一条缝都没有；明暗改用一条整体渐变来给。 */
+let _gy0 = 0, _gy1 = 1, _gwy = 0.62;
+function sealWashGeom(list, wx, wz){
+  let y0 = 1e9, y1 = -1e9;
+  for (const it of list) for (const p of it.P){ if (p[1] < y0) y0 = p[1]; if (p[1] > y1) y1 = p[1]; }
+  if (!(y1 - y0 > 1)) y1 = y0 + 1;
+  _gy0 = y0; _gy1 = y1;
+  const w = proj([wx, WY, wz]);
+  _gwy = w ? Math.max(0.04, Math.min(0.94, (w[1] - y0)/(y1 - y0))) : 0.62;
+}
+function sealWashPath(list){
+  ctx.beginPath();
+  for (const it of list){
+    const P = it.P;
+    ctx.moveTo(P[0][0], P[0][1]);
+    for (let i = 1; i < P.length; i++) ctx.lineTo(P[i][0], P[i][1]);
+    ctx.closePath();
+  }
+}
+function sealWash(stops){
+  const g = ctx.createLinearGradient(0, _gy0, 0, _gy1);
+  for (const s of stops) g.addColorStop(Math.max(0, Math.min(1, s[0])), s[1]);
+  return g;
+}
+const rgbs = (c, a) => `rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a})`;
+const C_DRY  = [253, 252, 249];   // 背脊：干的，近白（跟参考鸭一个亮度 —— 靠它从水里跳出来）
+const C_MID  = [243, 246, 250];
+const C_LOW  = [204, 217, 228];
+const C_WET  = [150, 172, 190];   // 水线处的湿痕 —— 别压太深，深了就成一条用尺子切出来的硬边
+const C_FIN  = [206, 216, 226];
+
+function paintSealFaces(list, Pw, sc, under, fl){
+  const inkU = mixC(INK, Pw.W, 0.38);
+  // 水面上看到的「水色」= 半透明水面压在纸上之后的实际颜色。
+  // 水下那半要往这个色融，直接往 Pw.W 融会越融越白、像搁在一只白盘子里。
+  const wEff = mixC(PAPER, Pw.W, Math.min(1, (Pw.topA === undefined ? 0.6 : Pw.topA) + 0.12));
+  const solid = [], tails = [], fins = [];
+  for (const it of list){
+    // eye / muzzle 由 drawFace / 眼睛那一遍单独画
+    if (it.kind === 'eye' || it.kind === 'muzzle') continue;
+    if (it.kind === 'tail') tails.push(it);
+    else if (it.kind === 'fin') fins.push(it);
+    else if (it.vis) solid.push(it);
+  }
+  /* --- 0. 独立小块（尾鳍 / 两只前鳍）---
+     凸体的可见面之间不会互相遮挡，所以并成一条路径填一次就够（无缝）；
+     轮廓用它自己的侧影棱描，逐段手绘抖动。 */
+  function drawBlob(items, opt){
+    const vis = items.filter(it => it.vis);
+    if (!vis.length) return;
+    sealWashPath(vis);
+    if (under){
+      const l1 = _gwy + (1 - _gwy)*0.30, l2 = _gwy + (1 - _gwy)*0.72;
+      ctx.fillStyle = sealWash([[_gwy, rgbs(mixC(C_WET, opt.dry, 0.35), 1)],
+                                [l1, rgbs(mixC(C_WET, wEff, 0.70), 1)],
+                                [1, rgbs(wEff, 1)]]);
+    } else {
+      ctx.fillStyle = sealWash([[0, rgbs(opt.dry, 1)],
+                                [_gwy*0.70, rgbs(opt.mid, 1)],
+                                [_gwy, rgbs(mixC(opt.low, C_WET, 0.35), 1)]]);
+    }
+    ctx.fill();
+    if (opt.flatten) return;
+    for (const it of vis){
+      if (!it[opt.key]) continue;
+      if (it.f.inner) continue;      // 扎在躯干里的那一截不描线
+      for (const eg of it[opt.key]){
+        const pts = wobbleEdge(eg.a, eg.b, eg.seed, 3, under ? 0.0014 : 0.0022);
+        if (pts.length >= 2)
+          pen(pts, under ? inkU : INK, under ? 0.70 : 1.22,
+              under ? 0.30 : 0.86, eg.seed, 0, false, 0.14, 0.11);
+      }
+    }
+  }
+  /* 尾鳍：最后面的一块，先画 → 埋进躯干的那一截被身体盖住 */
+  drawBlob(tails, { key: 'tedges', dry: C_DRY, mid: C_MID, low: C_LOW });
+
+  /* --- 1. 身体：一笔水彩铺底，没有任何接缝 --- */
+  if (solid.length){
+    sealWashPath(solid);
+    if (under){
+      // 越往下越快融进水色：到底部应该和水完全同色，身体的边界自己「化开」，
+      // 否则水下那半会像一块硬邦邦的板子搁在水里
+      const l1 = _gwy + (1 - _gwy)*0.30, l2 = _gwy + (1 - _gwy)*0.72;
+      ctx.fillStyle = sealWash([[_gwy, rgbs(C_WET, 1)],
+                                [l1, rgbs(mixC(C_WET, wEff, 0.62), 1)],
+                                [l2, rgbs(wEff, 1)],
+                                [1, rgbs(wEff, 1)]]);
+      ctx.fill();
+      ctx.fillStyle = sealWash([[_gwy, rgbs(wEff, 0)], [l1, rgbs(wEff, 0.22)], [1, rgbs(wEff, 0.60)]]);
+      ctx.fill();
+    } else {
+      // 出水那半：大部分是干的白背，只在贴近水线的一小段迅速转冷
+      // —— 参考鸭就是这个配方：近白主体 + 底部一条冷灰，所以能从水里跳出来
+      ctx.fillStyle = sealWash([[0, rgbs(C_DRY, 1)],
+                                [_gwy*0.52, rgbs(C_MID, 1)],
+                                [_gwy*0.86, rgbs(C_LOW, 1)],
+                                [_gwy, rgbs(C_WET, 1)]]);
+      ctx.fill();
+    }
+  }
+
+  /* --- 1.5 前鳍（两只「手」）：贴在腹侧、向体前下方伸出去的小鳍 ---
+     画在身体铺底之后、身体轮廓之前：埋在躯干里的那段被身体盖住，
+     露出来的那截压着身体边缘，自己的轮廓线接管了过去。
+
+     两只鳍分居身体两侧 —— 远侧那只必须被身体挡住，否则会变成
+     "浮在身体旁边的一个空圈"。判据用两只的**深度差**：
+       · 正视时两只到相机一样近（Δd≈0）→ 都画（用户要的"底下两只手"）
+       · 侧视时远侧那只深 0.2 以上 → 只画近侧那只 */
+  {
+    const g1 = [], g2 = [];
+    for (const it of fins) (it.f.ref[2] >= 0 ? g1 : g2).push(it);
+    let use = fins;
+    if (g1.length && g2.length){
+      const md = a => a.reduce((s, it) => s + it.d, 0)/a.length;
+      const d1 = md(g1), d2 = md(g2);
+      if (Math.abs(d1 - d2) > 0.05) use = d1 < d2 ? g1 : g2;
+    }
+    drawBlob(use, { key: 'fedges', dry: C_FIN, mid: C_FIN, low: C_LOW });
+  }
+
+  /* --- 2. 眼（只有出水那半才有） --- */
+  if (!under) for (const it of list){
+    if (it.kind !== 'eye') continue;
+    if (!it.vis) continue;
+    let cx = 0, cy = 0;
+    for (const p of it.P){ cx += p[0]; cy += p[1]; }
+    cx /= it.P.length; cy /= it.P.length;
+    const rr = it.f.rr || 0.024;
+    const r = Math.max(0.7, rr*SEAL_S*sc*fl/it.d);
+    ctx.fillStyle = rgbs(INK, 0.86);
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, TAU); ctx.fill();
+    if (it.f.hl){
+      ctx.fillStyle = 'rgba(255,255,255,0.52)';
+      ctx.beginPath(); ctx.arc(cx - r*0.32, cy - r*0.36, r*0.27, 0, TAU); ctx.fill();
+    }
+  }
+
+  /* --- 4. 水线：水面切过身体的那道口子 —— 全身最重的一条线 ---
+     只画近侧那半圈；远侧那半被身体挡着，画出来是一条浮在背上的虚线 */
+  for (const it of list){
+    if (!it.wline || !it.near) continue;
+    const pts = wobbleEdge(it.wline[0], it.wline[1], it.f.idx*1.37 + 11, 4, 0.0015);
+    if (pts.length >= 2)
+      pen(pts, mixC(INK, Pw.DK, 0.34), under ? 0.85 : 1.0, under ? 0.30 : 0.44,
+          it.f.idx*0.71 + 3, 0.02, false, 0.20, 0.18);
+  }
+
+  /* --- 5. 侧影棱：只在真实轮廓上落笔，沿边做确定性的三维抖动 → 是手描的线 ---
+     抖幅必须很小：轮廓是几十根短棱接起来的，抖一大就在接头处叠成一串疙瘩 */
+  for (const it of list){
+    if (!it.edges) continue;
+    const dep = under ? Math.min(1, Math.max(0, (WY - it.fc[1])/0.18)) : 0;
+    // 水下的棱要"化"掉：越深越弱，到底几乎不留线。
+    // 留一条硬边的话，水下那半会像一块板子搁在水里，而不是泡在水里
+    const ia = under ? Math.max(0.04, 0.58*(1 - 0.90*dep)) : 0.88;
+    for (const eg of it.edges){
+      const pts = wobbleEdge(eg.a, eg.b, eg.seed, 4, under ? 0.0016 : 0.0026);
+      if (pts.length >= 2)
+        // gap=0：一根轮廓由几十根短棱接成，任何一段被"断笔"跳过都会在整体上留下一处豁口
+        pen(pts, under ? inkU : INK, under ? 0.74 : 1.32, ia, eg.seed, 0, false, 0.12, 0.09);
+    }
+  }
+}
+
+/* 口鼻：三视图里吻尖那块灰 —— 一块**横向椭圆** + 底下一道嘴弧。
+   用户的原话："鼻子应该是一个椭圆形在他的脸前面"。
+   位置跟着「口鼻定位面」的投影走（那面在 buildSeal 里用 loftAt 贴在吻尖上）。
+
+   两个要点：
+   1) 画的是横椭圆（宽 ≈ 1.18r，高 ≈ 0.84r），不是圆 —— 参考图正视里
+      鼻子就是一个明显的横椭圆。
+   2) 整块按 |nv| 做透视缩短：nv = 口鼻法线·指向相机。
+      正对相机（正视）时 nv≈1 → 足尺；侧视时 nv≈0 → 缩到 0.42 倍，
+      变成吻尖上的一颗小灰点（跟参考侧视一致）。不做缩短的话，
+      侧视里会糊上一大块灰椭圆，看成"贴着张膏药"。 */
+function drawFace(list, wx, wy, wz, h, pitch, roll, sc, fl){
+  const face = list.find(it => it.kind === 'muzzle' && it.vis);
+  if (!face) return;
+  let cx = 0, cy = 0;
+  for (const p of face.P){ cx += p[0]; cy += p[1]; }
+  cx /= face.P.length; cy /= face.P.length;
+  const r0 = Math.max(1.2, (face.f.rr || 0.042)*SEAL_S*sc*fl/face.d);
+  const fore = 0.42 + 0.58*Math.min(1, Math.abs(face.nv || 0));   // 透视缩短
+  const r = r0*fore;
+  const rw = r*1.18, rh = r*0.84;
+  const gcol = mixC(INK, C_GRY, 0.66);
+  // 灰块本体（水彩感：两层，一层偏移一层实）
+  ctx.fillStyle = rgbs(mixC(gcol, PAPER, 0.18), 0.42);
+  ctx.beginPath(); ctx.ellipse(cx + 1.0*SC, cy + 1.4*SC, rw*1.06, rh*1.08, 0, 0, TAU); ctx.fill();
+  ctx.fillStyle = rgbs(gcol, 0.78);
+  ctx.beginPath(); ctx.ellipse(cx, cy, rw, rh, 0, 0, TAU); ctx.fill();
+  // 嘴：灰块下缘一道很淡的小弧 —— 是"嘴角"不是"圈口"，别做成一圈深色描边
+  ctx.strokeStyle = rgbs(mixC(INK, C_GRY, 0.52), 0.58);
+  ctx.lineWidth = Math.max(0.8, 0.0085*SEAL_S*sc*fl/face.d);
+  ctx.beginPath();
+  ctx.arc(cx, cy + rh*0.42, rw*0.52, 0.20*Math.PI, 0.80*Math.PI);
+  ctx.stroke();
+}
+
+const C_GRY = [146, 152, 156];
+
+/* ============================================================
+   池塘一角的小荷叶（漂在水上 · 接雨）
+   ============================================================ */
+const PAD_C = [141,170,146], PAD_D = [112,142,118];
+function makePadShape(){
+  const notch = rnd(0, TAU), nw = rnd(0.50, 0.72), n = 34, pts = [];
+  for (let k = 0; k <= n; k++){
+    const a = notch + nw + (TAU - 2*nw) * k / n;
+    const dEdge = Math.min(a - notch - nw, notch + TAU - nw - a);
+    const dip = 1 - 0.64 * Math.pow(Math.max(0, 1 - dEdge/(nw*2.4)), 1.7);
+    const rr = (1 + rnd(-0.11, 0.11)) * dip;
+    pts.push([Math.cos(a)*rr, Math.sin(a)*rr]);
+  }
+  const veins = [];
+  for (let i = 0; i < 6; i++){
+    const a0 = notch + nw + (TAU - 2*nw) * (i + 0.5) / 6;
+    veins.push([a0, 0.15, a0 + rnd(-0.14, 0.14), rnd(0.68, 0.85)]);
+  }
+  return { pts, veins };
+}
+const pad = { cx: -0.62, cz: 0.60, r: 0.24, y: 0.006, rot: rnd(0, TAU), seed: rnd(0, 100), shape: makePadShape() };
+function drawPad(now){
+  const y = pad.y + Math.sin(now*0.7 + 1.1)*0.004;
+  const pc = proj([pad.cx, y, pad.cz]);
+  if (!pc) return;
+  const rot = pad.rot + Math.sin(now*0.35 + pad.seed)*0.05;
+  const cs = Math.cos(rot), sn = Math.sin(rot);
+  const pts = pad.shape.pts.map(p => proj([pad.cx + (p[0]*cs - p[1]*sn)*pad.r, y, pad.cz + (p[0]*sn + p[1]*cs)*pad.r]));
+  if (pts.some(p => !p)) return;
+  ctx.save();
+  clipQuad(wi.map(proj));
+  fillPoly(pts, PAD_C, 0.8, true);
+  fillPoly(pts.map(p => [pc[0] + (p[0]-pc[0])*0.74 + 2*SC, pc[1] + (p[1]-pc[1])*0.74 + 1.5*SC]), PAD_D, 0.22, false);
+  for (const v of pad.shape.veins){
+    const a0 = v[0] + rot, a1 = v[2] + rot;
+    const p0 = proj([pad.cx + Math.cos(a0)*v[1]*pad.r, y + 0.002, pad.cz + Math.sin(a0)*v[1]*pad.r]);
+    const p1 = proj([pad.cx + Math.cos(a1)*v[3]*pad.r, y + 0.002, pad.cz + Math.sin(a1)*v[3]*pad.r]);
+    if (p0 && p1) pen([p0, p1], PAD_D, 0.9, 0.3, pad.seed + v[0]*57, 0.25, false);
+  }
+  pen(pts, INK, 1.4, 0.78, pad.seed*7.7, 0.05, false);
+  ctx.fillStyle = 'rgba(62,48,38,0.45)';
+  ctx.beginPath(); ctx.arc(pc[0], pc[1], 1.9*SC, 0, TAU); ctx.fill();
+  ctx.restore();
+}
+
+/* ============================================================
+   海豹状态
+   ============================================================ */
+/* h0 = 基准朝向：让体轴与相机方位大约差 90° → 一开始就是侧身，不是正对头
+   之后用两个不同周期的正弦缓慢摆头，永远在「侧身 ± 25°」内游移 */
+/* 朝向：默认机位在 cam.theta=0.62（≈+x+z 方向）。
+   原来是 2.20 rad → 鼻子和视线差 71°，整只读成"一团白+一个后脑勺"；
+   正对相机（≈0.98 rad）又只剩一个蛋，看不出是海豹。
+   取 1.80 rad：差 ≈47°，脸和身体各露一半 —— 侧影和表情都在。 */
+const seal = { x: 0.12, z: -0.04, h0: 1.80, h: 1.80, roll: 0, bobY: 0, click: 0, rippleT: 0.4 };
+function updSeal(dt, now){
+  const hT = seal.h0 + Math.sin(now*0.075)*0.42 + Math.sin(now*0.031 + 1.7)*0.22;
+  seal.h += (hT - seal.h) * Math.min(1, dt*0.7);
+  const bob = Math.sin(now*0.85)*0.012 + Math.sin(now*1.63 + 0.9)*0.005;
+  const lift = seal.click > 0 ? Math.sin((1 - seal.click)*Math.PI) * 0.085 : 0;
+  seal.bobY = bob + lift;
+  seal.roll = Math.sin(now*0.71)*0.030 + (seal.click > 0 ? Math.sin((1 - seal.click)*TAU)*0.06 : 0);
+  if (seal.click > 0) seal.click = Math.max(0, seal.click - dt/1.15);
+  seal.rippleT -= dt;
+  if (seal.rippleT <= 0){
+    seal.rippleT = rnd(0.45, 0.95);
+    // 沿海豹体轴随机取点冒圈：整条身子都在把水推开
+    const u = rnd(-0.36, 0.30);
+    addRipple(seal.x + Math.cos(seal.h)*u, seal.z + Math.sin(seal.h)*u, Math.random() < 0.3);
+  }
+}
+const sealWorldY = () => WY + SEAL_Y + seal.bobY;
+
+/* 水下那半：先画 → 被后面的涟漪压住，像真的泡在水里 */
+function drawSealBelow(Pw, sc){
+  const wx = seal.x, wy = sealWorldY(), wz = seal.z;
+  const list = sealFaces(wx, wy, wz, seal.h, SEAL_PITCH, seal.roll, sc, proj, Fv, WY);
+  sealWashGeom(list, wx, wz);   // 整体渐变按「整只海豹」定位 → 上下两半的水色天然对齐
+  // 身体压出来的暗水圈：跟着体轴转，才像船身划开的水面
+  const c0 = proj([wx, WY + 0.004, wz]);
+  if (c0){
+    const c1 = proj([wx + Math.cos(seal.h)*0.35, WY + 0.004, wz + Math.sin(seal.h)*0.35]);
+    const ang = c1 ? Math.atan2(c1[1] - c0[1], c1[0] - c0[0]) : 0;
+    ctx.beginPath();
+    ctx.ellipse(c0[0] + 1.5*SC, c0[1] + 2*SC, 0.40*focal/c0[2], 0.15*focal/c0[2], ang, 0, TAU);
+    ctx.fillStyle = 'rgba(96,116,128,0.075)';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(c0[0], c0[1], 0.26*focal/c0[2], 0.115*focal/c0[2], ang, 0, TAU);
+    ctx.fillStyle = 'rgba(96,116,128,0.06)';
+    ctx.fill();
+  }
+  const under = list.filter(it => it.under);
+  paintSealFaces(under, Pw, sc, true, focal);
+}
+/* 出水那半：最后画 → 压住涟漪，墨线全新 */
+function drawSealAbove(Pw, sc){
+  const wx = seal.x, wy = sealWorldY(), wz = seal.z;
+  const list = sealFaces(wx, wy, wz, seal.h, SEAL_PITCH, seal.roll, sc, proj, Fv, WY);
+  sealWashGeom(list, wx, wz);
+  paintSealFaces(list.filter(it => !it.under), Pw, sc, false, focal);
+  drawFace(list, wx, wy, wz, seal.h, SEAL_PITCH, seal.roll, sc, focal);
+}
+
+/* ---------- 渲染 ---------- */
+const sideN = [[1,0,0],[0,0,-1],[-1,0,0],[0,0,1]];
+const boxCenter = [0, (TOP+BOT)/2, 0];
+function faceCenter(pts){ let x=0,y=0,z=0; for(const p of pts){x+=p[0];y+=p[1];z+=p[2];} return [x/pts.length,y/pts.length,z/pts.length]; }
+
+function drawSide(i){
+  const j = (i+1)%4;
+  const P = curWaterPal();
+  const q = [co[i], co[j], cb[j], cb[i]].map(proj);
+  ctx.save();
+  clipQuad(q);
+  fillPoly(q, P.W, P.sideA, true);
+  const vAt = (a, b, v) => [a[0]+(b[0]-a[0])*v, a[1]+(b[1]-a[1])*v, a[2]+(b[2]-a[2])*v];
+  fillPoly([vAt(co[i], cb[i], 0.5), vAt(co[j], cb[j], 0.5), cb[j], cb[i]].map(proj), P.DK, 0.15, false);
+  const d = sideDecos[i];
+  for (const b of d.blobs) fillPoly(b.pts.map(proj), sideBlobCol(P, b.kind), b.a, false);
+  for (const h of d.hatches){
+    const p1 = proj(h[0]), p2 = proj(h[1]);
+    if (p1 && p2) pen([p1, p2], P.DK, 1.0, 0.2, i*31 + h[0][0]*57, 0, false);
+  }
+  ctx.restore();
+}
+function drawWater(){
+  const q = wi.map(proj);
+  const P = curWaterPal();
+  ctx.save();
+  clipQuad(q);
+  fillPoly(q, P.W, P.topA, true);
+  for (const b of waterBlobs) fillPoly(b.pts.map(proj), blobCol(P, b.kind), b.a, false);
+  if (waterT < 1 && paintBlob){
+    const s = 1.92 * easeW(waterT) + 0.001;
+    const bp = paintBlob.map(p => proj([p[0]*s, WY + 0.004, p[1]*s]));
+    if (bp.every(p => p)){
+      ctx.save();
+      clipQuad(bp);
+      fillPoly(q, waterTo.W, waterTo.topA, true);
+      for (const b of waterBlobs) fillPoly(b.pts.map(proj), blobCol(waterTo, b.kind), b.a, false);
+      ctx.restore();
+    }
+  }
+  ctx.save();
+  ctx.globalCompositeOperation = 'multiply';
+  ctx.globalAlpha = 0.5;
+  ctx.drawImage(paper, 0, 0, W, H);
+  ctx.restore();
+  strokePoly(q, P.DK, 0.14, 4);
+  ctx.fillStyle = `rgba(${P.DK[0]},${P.DK[1]},${P.DK[2]},0.18)`;
+  for (const s of waterSpecks){
+    const p = proj([s[0], WY+0.001, s[1]]);
+    if (p) { ctx.beginPath(); ctx.arc(p[0], p[1], 1.1*SC, 0, TAU); ctx.fill(); }
+  }
+  ctx.restore();
+  for (let i = 0; i < 4; i++){
+    const j = (i+1)%4;
+    pen(wobblePts(wi[i], wi[j], 10, 0.008).map(proj), P.DK, 1.3, 0.55, i*17+3, 0.06);
+  }
+}
+function drawShadow(){
+  const e = 1.14, y = BOT - 0.015;
+  const sq = [[e,y,e],[e,y,-e],[-e,y,-e],[-e,y,e]].map(p => [p[0]+0.05, p[1], p[2]+0.04]);
+  fillPoly(sq.map(proj), SHADOW_C, 0.09, false);
+  const sq2 = sq.map(p => [p[0]*1.07, p[1], p[2]*1.07]);
+  fillPoly(sq2.map(proj), SHADOW_C, 0.05, false);
+}
+function drawRipples(){
+  if (!ripples.length) return;
+  const q = wi.map(proj);
+  ctx.save();
+  clipQuad(q);
+  for (const rp of ripples){
+    if (rp.t < 0.16 && !rp.tap){
+      const pc = proj([rp.cx, WY + 0.006, rp.cz]);
+      if (pc){
+        ctx.fillStyle = `rgba(${pal.SP_D[0]},${pal.SP_D[1]},${pal.SP_D[2]},${Math.min(1, 0.95*(1 - rp.t/0.16))})`;
+        ctx.beginPath(); ctx.arc(pc[0], pc[1], 1.8*SC, 0, TAU); ctx.fill();
+      }
+    }
+    for (const ring of rp.rings){
+      const t = (rp.t - ring.delay) / rp.life;
+      if (t < 0 || t > 1) continue;
+      let r, alpha;
+      if (rp.tap){
+        const tl = rp.t - ring.delay;
+        const u = Math.min(1, Math.max(0, tl/ring.growD));
+        r = ring.maxR * (1 - (1 - u)*(1 - u));
+        alpha = ring.am * (1 - u);
+      } else {
+        r = ring.maxR * (1 - (1-t)*(1-t));
+        alpha = Math.min(1, 1.15 * (1 - t));
+      }
+      const pts = [];
+      for (let k = 0; k < 18; k++){
+        const a = k/18*TAU + ring.jit[k][0];
+        const rr = r * (1 + ring.jit[k][1]);
+        const p = proj([rp.cx + Math.cos(a)*rr, WY + 0.004, rp.cz + Math.sin(a)*rr]);
+        if (p) pts.push(p);
+      }
+      pts.push(pts[0]);
+      pen(pts, ring.c, ring.w, alpha, rp.seed + ring.delay*91, 0.05);
+    }
+  }
+  ctx.restore();
+}
+function drawSplashes(topPass){
+  for (const s of splashes){
+    if (!!s.pad !== !!topPass) continue;
+    if (s.t >= s.life) continue;
+    const k = 1 - s.t/s.life;
+    const p1 = proj([s.x, s.y, s.z]);
+    if (!p1) continue;
+    const p0 = proj([s.x - s.vx*0.05, s.y - s.vy*0.05, s.z - s.vz*0.05]);
+    const c = s.white ? pal.SP_W : pal.SP_D;
+    ctx.strokeStyle = `rgba(${c[0]},${c[1]},${c[2]},${Math.min(1, 0.95*k + 0.15)})`;
+    ctx.lineWidth = Math.max(0.8, s.r*k + 0.5) * SC;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(p0 ? p0[0] : p1[0], p0 ? p0[1] : p1[1]);
+    ctx.lineTo(p1[0], p1[1]);
+    ctx.stroke();
+    if (s.white && s.t < s.life*0.5){
+      ctx.fillStyle = `rgba(255,255,255,${Math.min(1, 0.9*k)})`;
+      ctx.beginPath();
+      ctx.arc(p1[0], p1[1], Math.max(0.5, s.r*0.5*k) * SC, 0, TAU);
+      ctx.fill();
+    }
+  }
+}
+function drawDrop(d){
+  const h = proj([d.x, d.y, d.z]);
+  const t = proj([d.x - wind[0]*d.len, d.y - wind[1]*d.len, d.z - wind[2]*d.len]);
+  if (!h || !t) return;
+  const pts = [h];
+  for (let k = 1; k < 3; k++){
+    const u = k/3;
+    pts.push([h[0]+(t[0]-h[0])*u + rnd(-1.3,1.3)*SC, h[1]+(t[1]-h[1])*u + rnd(-1.3,1.3)*SC]);
+  }
+  pts.push(t);
+  pen(pts, d.c, d.w, d.a, d.id*7.7, 0.03, false);
+}
+
+/* ---------- 主题色板（画面底部一行 · 钢笔手绘小方块） ---------- */
+const NSWATCH = 7;
+const swShapes = [];
+for (let i = 0; i < NSWATCH; i++){
+  const pts = [];
+  const cs = [[-0.5,-0.5],[0.5,-0.5],[0.5,0.5],[-0.5,0.5]];
+  for (let e = 0; e < 4; e++){
+    const a = cs[e], b = cs[(e+1)%4];
+    for (let k = 0; k < 4; k++){
+      const t = k/4;
+      pts.push([ a[0]+(b[0]-a[0])*t + rnd(-0.045,0.045), a[1]+(b[1]-a[1])*t + rnd(-0.045,0.045) ]);
+    }
+  }
+  pts.push(pts[0]);
+  swShapes.push(pts);
+}
+let hoverIdx = -1;
+const SW_BASE = 34, SW_GAP = 20;
+function swatchPos(i){
+  const act = i === themeIdx, hov = i === hoverIdx;
+  return {
+    cx: W/2 + (i - (NSWATCH-1)/2)*(SW_BASE + SW_GAP)*SC,
+    cy: H - SABOT - (58 + (act ? 4 : (hov ? 2 : 0)))*SC,
+    s: (act ? 40 : (hov ? 37 : SW_BASE))*SC
+  };
+}
+function hitSwatch(px, py){
+  for (let i = 0; i < NSWATCH; i++){
+    const { cx, cy, s } = swatchPos(i);
+    if (Math.abs(px - cx) < s*0.62 && Math.abs(py - cy) < s*0.62) return i;
+  }
+  return -1;
+}
+function drawSwatches(){
+  for (let i = 0; i < NSWATCH; i++){
+    const { cx, cy, s } = swatchPos(i);
+    const act = i === themeIdx;
+    const P = THEMES[i];
+    const pts = swShapes[i].map(p => [cx + p[0]*s, cy + p[1]*s]);
+    ctx.fillStyle = `rgba(${P.W[0]},${P.W[1]},${P.W[2]},${act ? 0.9 : 0.72})`;
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let k = 1; k < pts.length; k++) ctx.lineTo(pts[k][0], pts[k][1]);
+    ctx.closePath();
+    ctx.fill();
+    ctx.save();
+    ctx.translate(1.6*SC, 1.2*SC);
+    ctx.fillStyle = `rgba(${P.W[0]},${P.W[1]},${P.W[2]},${act ? 0.35 : 0.26})`;
+    ctx.fill();
+    ctx.restore();
+    pen(pts, INK, act ? 1.8 : 1.4, act ? 0.9 : 0.68, i*43.7, 0.04);
+    if (act) pen([[cx-10*SC, cy + s*0.62 + 8*SC],[cx+10*SC, cy + s*0.62 + 8*SC]], INK, 1.6, 0.72, i*17.3, 0);
+  }
+}
+
+/* ============================================================
+   右上角「i」信息按钮 + 关于卡片
+   —— 跟页面其余 UI（色板 / 手绘笔触）同一套语言：全 Canvas 手绘，
+      暖白纸面 + 褐色钢笔圈。链接是真能点的，直接打开原作。
+   ============================================================ */
+const INFO_URL   = 'https://shrimp0913.github.io/rain-simulator/';
+const INFO_URL_2 = ['https://shrimp0913.github.io/', 'rain-simulator/'];
+const INFO_TITLE = "Shrimp's Studio";
+const INFO_SUB   = '略略略CodeLab';
+const INFO_LBL   = '原作 · Rain Simulator';
+/* 「圆润可爱」字体栈。
+   Canvas 的 font 是**逐字形回落**的：一句话里英文命中第一个有该字形的族，
+   中文再往后找。所以中英混排（比如「略略略CodeLab」）能各自取到想要的字面，
+   不用把一行拆成两段去画。
+   · 英文 → Arial Rounded MT Bold（圆头、笔画饱满）
+   · 中文 → 圆体-简 Yuanti SC（macOS 的圆黑；没有就退手札体 / 苹方）
+   没有圆体的机器（比如 Windows）整体退到 微软雅黑，形状变方但不缺字、不错行。 */
+const F_ROUND = '"Arial Rounded MT Bold","Yuanti SC","Hannotate SC",' +
+                '"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif';
+/* 链接行单独一栈：Yuanti SC 自带一套圆润的拉丁字形，比粗圆体轻、比等宽亲和，
+   读 URL 也不费劲；万一这台机器没有圆体，再退到等宽 —— 任何环境下都不会糊成一团。 */
+const F_LINK  = '"Yuanti SC","Arial Rounded MT Bold","SF Mono",Menlo,Consolas,monospace';
+
+let infoOpen = false, infoHover = false, infoLinkOn = false, infoT = 0;
+
+/* 按钮那圈手绘圆：极坐标 + 固定抖动（用 hash 而不是 random，逐帧稳定不乱跳） */
+const IB_SHAPE = [];
+for (let k = 0; k <= 34; k++){
+  const a = TAU*k/34;
+  const w = 1 + (hash(k*12.9 + 3.1) - 0.5)*0.062;
+  IB_SHAPE.push([Math.cos(a)*w, Math.sin(a)*w]);
+}
+function infoBtnPos(){
+  const r = (infoHover || infoOpen ? 19.5 : 17.5)*SC;
+  return { cx: W - 24*SC - r, cy: SATOP + 24*SC + r, r };
+}
+/* 命中半径留 1.26 倍余量（手指也点得中）；hover 时圆变大，
+   所以边界带一点滞回 —— 不会在边缘来回闪 */
+function hitInfo(px, py){
+  const b = infoBtnPos();
+  return Math.hypot(px - b.cx, py - b.cy) <= b.r*1.26;
+}
+
+function infoMetrics(){
+  const s = SC;
+  const pad = 28*s;
+  const fT = 28*s, fS = 19*s, fL = 12.5*s;
+  let   fK = 14.5*s;
+  /* 卡片宽度：够宽才放得下一整行 URL；窗口窄就落回两行 */
+  const w  = Math.min(498*s, W - 34*s);
+  const room = w - pad*2;
+  ctx.save();
+  ctx.font = `400 ${fK}px ${F_LINK}`;
+  const twoLine = ctx.measureText(INFO_URL).width > room;
+  if (twoLine){
+    /* 折成两行还放不下（超窄屏，比如 320px）：按比例把链接字号缩一点。
+       缩的是整块里唯一没法再折的那行（域名那行）。 */
+    let need = 0;
+    for (const ln of INFO_URL_2) need = Math.max(need, ctx.measureText(ln).width);
+    if (need > room){ fK *= room/need; ctx.font = `400 ${fK}px ${F_LINK}`; }
+  }
+  ctx.restore();
+  const lh    = fK*1.52;
+  const linkH = twoLine ? lh*2 : lh;
+
+  let yy = pad;
+  const titleB = yy + fT*0.80;  yy = titleB + fS*1.40;
+  const subB   = yy;            yy += 22*s;
+  const divY   = yy;            yy += fL*0.92 + 22*s;   // 分隔行（横线 + 右端小标签）
+  const linkTop = yy;
+  const linkB1  = linkTop + fK*1.06;
+  const linkB2  = linkTop + lh  + fK*1.06;
+  const h = linkTop + linkH + pad*0.92;
+  const x = W/2 - w/2, y = H/2 - h/2;
+  return { s, pad, fT, fS, fL, fK, w, h, x, y, lh, linkH, twoLine,
+           titleB: y + titleB, subB: y + subB, divY: y + divY,
+           linkTop: y + linkTop, linkB1: y + linkB1, linkB2: y + linkB2,
+           lines: twoLine ? INFO_URL_2 : [INFO_URL] };
+}
+/* 链接的可点区域：只包住文字本身（不用整行宽度，免得旁边空白也能点开） */
+function infoLinkRect(){
+  const m = infoMetrics();
+  ctx.save();
+  ctx.font = `400 ${m.fK}px ${F_LINK}`;
+  let tw = 0;
+  for (const ln of m.lines) tw = Math.max(tw, ctx.measureText(ln).width);
+  ctx.restore();
+  return { x: m.x + m.pad - 6*m.s, y: m.linkTop - 5*m.s,
+           w: tw + 12*m.s, h: m.linkH + 10*m.s };
+}
+function infoLinkHit(px, py){
+  const r = infoLinkRect();
+  return px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h;
+}
+
+function pathRound(x, y, w, h, r){
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y); ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r); ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h); ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r); ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+/* 手绘矩形（一圈抖动折线），给卡片当外框 */
+function wobblyRect(x, y, w, h, seg, amp, seed){
+  const c = [[x,y],[x+w,y],[x+w,y+h],[x,y+h]], pts = [];
+  for (let e = 0; e < 4; e++){
+    const a = c[e], b = c[(e+1)%4];
+    for (let k = 0; k < seg; k++){
+      const t = k/seg;
+      pts.push([ a[0] + (b[0]-a[0])*t + (hash(seed + e*7.13 + k*2.31) - 0.5)*amp,
+                 a[1] + (b[1]-a[1])*t + (hash(seed + 31.7 + e*5.91 + k*3.77) - 0.5)*amp ]);
+    }
+  }
+  pts.push(pts[0]);
+  return pts;
+}
+/* 字：两层 —— 先一层淡的偏移（当水彩洇开），再一层实的 */
+function inkText(str, x, y, font, col, alpha, s, align){
+  ctx.font = font;
+  ctx.textAlign = align || 'left'; ctx.textBaseline = 'alphabetic';
+  const dx = align === 'right' ? -1.2*s : 1.4*s;
+  ctx.fillStyle = rgbs(col, alpha*0.20);
+  ctx.fillText(str, x + dx, y + 1.2*s);
+  ctx.fillStyle = rgbs(col, alpha);
+  ctx.fillText(str, x, y);
+}
+
+function drawInfoButton(){
+  const b = infoBtnPos(), s = SC;
+  const pts = IB_SHAPE.map(p => [b.cx + p[0]*b.r, b.cy + p[1]*b.r]);
+  ctx.beginPath();
+  ctx.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+  ctx.closePath();
+  if (infoOpen) ctx.fillStyle = 'rgba(78,66,54,0.90)';
+  else          ctx.fillStyle = `rgba(250,245,234,${infoHover ? 0.94 : 0.76})`;
+  ctx.fill();
+  pen(pts, INK, infoHover || infoOpen ? 2.0 : 1.7,
+      infoOpen ? 0.95 : 0.82, 7.31, 0.03, false, 0.34, 0.28);
+  /* 「i」＝上一点 + 下一竖；卡片打开时按钮反白 */
+  const ic = infoOpen ? [247, 242, 231] : INK;
+  ctx.beginPath();
+  ctx.arc(b.cx, b.cy - b.r*0.37, Math.max(1.4, b.r*0.118), 0, TAU);
+  ctx.fillStyle = rgbs(ic, 0.94); ctx.fill();
+  pen([[b.cx, b.cy - b.r*0.06],[b.cx, b.cy + b.r*0.40]], ic, 2.4, 0.94,
+      3.7, 0, false, 0.18, 0.14);
+}
+
+function drawInfoPanel(){
+  if (infoT <= 0) return;
+  const t = 1 - Math.pow(1 - infoT, 3);
+  const m = infoMetrics(), s = m.s;
+
+  /* 背景压一层暖色薄纱，卡片才浮得起来 */
+  ctx.fillStyle = `rgba(62,50,40,${0.22*t})`;
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.save();
+  ctx.globalAlpha = t;
+  const k = 0.955 + 0.045*t;
+  ctx.translate(W/2, H/2); ctx.scale(k, k); ctx.translate(-W/2, -H/2);
+
+  /* 纸卡：偏移的一块当投影 + 正的一块当纸面。
+     纸面**必须完全不透明** —— 留一点透明度的话，背后的雨丝 / 水体
+     会隐隐透上来，读起来像 bug 而不是「半透明卡片」。
+     淡入由 globalAlpha 负责，不需要靠填充色的 alpha。 */
+  pathRound(m.x + 5*s, m.y + 8*s, m.w, m.h, 5*s);
+  ctx.fillStyle = 'rgba(88,74,60,0.17)'; ctx.fill();
+  pathRound(m.x, m.y, m.w, m.h, 5*s);
+  ctx.fillStyle = 'rgb(251,247,238)'; ctx.fill();
+  pen(wobblyRect(m.x, m.y, m.w, m.h, 9, 1.7*s, 5.13),
+      INK, 1.85, 0.90, 5.13, 0.02, false, 0.26, 0.22);
+
+  /* 标题 + 副题 */
+  inkText(INFO_TITLE, m.x + m.pad, m.titleB, `600 ${m.fT}px ${F_ROUND}`, INK, 0.94, s);
+  inkText(INFO_SUB, m.x + m.pad, m.subB, `600 ${m.fS}px ${F_ROUND}`,
+          mixC(INK, C_GRY, 0.42), 0.92, s);
+
+  /* 分隔行：一道手绘横线 + 右端一个小标签
+     —— 标签放右端，顺手把卡片右侧那片空白也补上。 */
+  ctx.font = `400 ${m.fL}px ${F_ROUND}`;
+  const lblW = ctx.measureText(INFO_LBL).width;
+  const d0 = m.x + m.pad, d1 = m.x + m.w - m.pad - lblW - 14*s, dy = m.divY, dp = [];
+  for (let k2 = 0; k2 <= 20; k2++){
+    const tt = k2/20;
+    dp.push([d0 + (d1-d0)*tt, dy + (hash(9.1 + k2*3.3) - 0.5)*1.8*s]);
+  }
+  pen(dp, mixC(INK, C_GRY, 0.5), 1.15, 0.40, 9.1, 0, false, 0.30, 0.40);
+  inkText(INFO_LBL, m.x + m.w - m.pad, dy + m.fL*0.34,
+          `400 ${m.fL}px ${F_ROUND}`, mixC(INK, C_GRY, 0.58), 0.62, s, 'right');
+
+  /* 链接：手绘下划线；指针悬停时变深加粗 */
+  const lc = infoLinkOn ? [58, 84, 120] : [92, 114, 144];
+  for (let li = 0; li < m.lines.length; li++){
+    const ln = m.lines[li], bx = m.x + m.pad, by = m.linkB1 + li*m.lh;
+    inkText(ln, bx, by, `400 ${m.fK}px ${F_LINK}`, lc, infoLinkOn ? 0.98 : 0.85, s);
+    const tw = ctx.measureText(ln).width, up = [];
+    for (let k3 = 0; k3 <= 18; k3++){
+      const tt = k3/18;
+      up.push([bx + tw*tt, by + m.fK*0.26 + (hash(4.2 + li*8.8 + k3*2.6) - 0.5)*1.5*s]);
+    }
+    pen(up, lc, infoLinkOn ? 1.5 : 1.15, infoLinkOn ? 0.92 : 0.66,
+        4.2 + li*8.8, 0.04, false, 0.30, 0.40);
+  }
+
+  /* 右上角关闭 ×（点卡片外任意处也关） */
+  const cxp = m.x + m.w - 25*s, cyp = m.y + 25*s, cr = 7.5*s;
+  pen([[cxp-cr, cyp-cr],[cxp+cr, cyp+cr]], INK, 1.6, 0.55, 12.3, 0, false, 0.30, 0.26);
+  pen([[cxp+cr, cyp-cr],[cxp-cr, cyp+cr]], INK, 1.6, 0.55, 14.7, 0, false, 0.30, 0.26);
+
+  ctx.restore();
+}
+
+/* ---------- 主循环 ---------- */
+let lastT = 0, interacted = false;
+function frame(now){
+  const dt = Math.min(0.033, (now - lastT)/1000 || 0.016);
+  const nowS = now/1000;
+  lastT = now;
+  if (!interacted) cam.theta += dt * 0.045;
+  updCam();
+
+  if (waterT < 1) waterT = Math.min(1, waterT + dt/WATER_DUR);
+  /* 关于卡片的开合（开慢一点、关快一点，收得干脆） */
+  if (infoT !== (infoOpen ? 1 : 0))
+    infoT = Math.min(1, Math.max(0, infoT + (infoOpen ? dt/0.18 : -dt/0.14)));
+  updSeal(dt, nowS);
+
+  for (const d of drops){
+    d.y += wind[1]*d.spd*dt;
+    d.x += wind[0]*d.spd*dt;
+    d.z += wind[2]*d.spd*dt;
+    // 荷叶接雨
+    const py = pad.y + Math.sin(nowS*0.7 + 1.1)*0.004;
+    if (Math.hypot(d.x - pad.cx, d.z - pad.cz) < pad.r*0.9 && d.y <= py + 0.014){
+      if (Math.abs(d.x) < OH+0.16 && Math.abs(d.z) < OH+0.16 && Math.random() < 0.85)
+        addTopSplash(d.x, d.z, py + 0.016);
+      respawn(d, false);
+      continue;
+    }
+    // 打在小海豹背上 → 白水花（画在最上层，不会被身体盖住）
+    // 背脊是个圆拱：中间高、边缘低，用一条 dome 曲线近似，雨才不会"穿过"身体
+    const sr = Math.hypot(d.x - seal.x, d.z - seal.z);
+    if (sr < 0.32){
+      const by = WY + SEAL_Y + 0.155*Math.max(0, 1 - Math.pow(sr/0.32, 1.6)) + seal.bobY;
+      if (d.y <= by){
+        if (Math.random() < 0.8) addTopSplash(d.x, d.z, by + 0.006);
+        respawn(d, false);
+        continue;
+      }
+    }
+    if (d.y <= WY){
+      if (Math.abs(d.x) < WH && Math.abs(d.z) < WH){
+        if (Math.random() < 0.7) addRipple(d.x, d.z, false);
+        if (Math.random() < 0.2) addSplash(d.x, d.z, 2 + (Math.random()*3|0));
+      }
+      respawn(d, false);
+    }
+  }
+  for (let i = ripples.length-1; i >= 0; i--){
+    ripples[i].t += dt;
+    if (ripples[i].t > ripples[i].life + (ripples[i].tap ? 0.3 : 0.4)) ripples.splice(i, 1);
+  }
+  for (let i = splashes.length-1; i >= 0; i--){
+    const s = splashes[i];
+    s.t += dt;
+    s.vy -= 5.5*dt;
+    s.x += s.vx*dt; s.y += s.vy*dt; s.z += s.vz*dt;
+    if (s.t >= s.life) splashes.splice(i, 1);
+  }
+
+  /* --- 绘制 --- */
+  const Pw = curWaterPal();
+  ctx.clearRect(0, 0, W, H);
+  ctx.drawImage(paper, 0, 0, W, H);
+  drawShadow();
+
+  const sideVis = sideN.map(n => dot(n, sub(eye, boxCenter)) > 0);
+  const centerDepth = depthOf([0, cam.ty, 0]);
+
+  const nearRain = [];
+  for (const d of drops){
+    if (depthOf([d.x, d.y, d.z]) > centerDepth + 0.35) drawDrop(d);
+    else nearRain.push(d);
+  }
+  const hidEdge = e => (e.grp === 'bot' && !sideVis[e.side]) || (e.grp === 'ver' && !(sideVis[e.side[0]] || sideVis[e.side[1]]));
+  for (const e of edgeDefs){
+    if (!hidEdge(e)) continue;
+    const pts = e.pts.map(proj);
+    if (pts.some(p => !p)) continue;
+    pen(pts, INK, e.w*0.8, e.al*0.3, e.id.length*37 + e.pts[0][0]*13, 0.05);
+  }
+  const faces = [];
+  for (let i = 0; i < 4; i++){
+    const j = (i+1)%4;
+    faces.push({ d: depthOf(faceCenter([co[i], co[j], cb[j], cb[i]])), fn: () => drawSide(i) });
+  }
+  faces.push({ d: depthOf([0, WY, 0]), fn: drawWater });
+  faces.sort((a, b) => b.d - a.d);
+  for (const f of faces) f.fn();
+
+  drawSealBelow(Pw, 1);          // 水下那半（在涟漪之下）
+
+  for (const e of edgeDefs){
+    if (hidEdge(e)) continue;
+    const pts = e.pts.map(proj);
+    if (pts.some(p => !p)) continue;
+    pen(pts, INK, e.w, e.al, e.id.length*37 + e.pts[0][0]*13, 0.05);
+  }
+  drawRipples();
+  drawSplashes(false);
+  /* 荷叶（漂在水上的一块）和「出水那半」谁在前？
+     之前荷叶固定先画 —— 荷叶在海豹后面时确实被挡住了，
+     但荷叶转到海豹**前面**时也会被无端盖掉，那是同一处 bug 的镜像。
+     两个都是实心不透明的东西，直接比一下到相机的深度，谁近谁后画。 */
+  {
+    const padD  = depthOf([pad.cx, WY + pad.y, pad.cz]);
+    const sealD = depthOf([seal.x, WY + SEAL_Y + 0.26, seal.z]);
+    if (padD > sealD){ drawPad(nowS); drawSealAbove(Pw, 1); }
+    else            { drawSealAbove(Pw, 1); drawPad(nowS); }
+  }
+  drawSplashes(true);            // 背上 / 荷叶上的水花最后画
+  for (const d of nearRain) drawDrop(d);
+  drawSwatches();
+  drawInfoButton();
+  drawInfoPanel();
+  requestAnimationFrame(frame);
+}
+
+/* ---------- Pointer Events 兜底：老 iOS Safari / 老 Android WebView ---------- */
+(function(){
+  if (window.PointerEvent) return;
+  cv.setPointerCapture = function(){};
+  cv.releasePointerCapture = function(){};
+  const fire = (type, t, pType, target) => {
+    try {
+      const ev = document.createEvent('CustomEvent');
+      ev.initCustomEvent(type, true, true, null);
+      ev.clientX = t.clientX; ev.clientY = t.clientY;
+      ev.pointerId = (t.identifier !== undefined ? t.identifier : 1) + 100;
+      ev.pointerType = pType; ev.isPrimary = true;
+      (target || window).dispatchEvent(ev);
+    } catch(err){}
+  };
+  const TMAP = { touchstart:'pointerdown', touchmove:'pointermove', touchend:'pointerup', touchcancel:'pointercancel' };
+  for (const src in TMAP){
+    window.addEventListener(src, e => {
+      if (src === 'touchstart' || src === 'touchmove') e.preventDefault();
+      const pts = (src === 'touchend' || src === 'touchcancel') ? e.changedTouches
+                 : (e.touches && e.touches.length ? e.touches : [e]);
+      for (const t of pts) fire(TMAP[src], t, 'touch', e.target);
+    }, { passive: false });
+  }
+  let lastTT = 0;
+  window.addEventListener('touchstart', () => { lastTT = Date.now(); }, { passive: true });
+  const MMAP = { mousedown:'pointerdown', mousemove:'pointermove', mouseup:'pointerup' };
+  for (const src in MMAP)
+    window.addEventListener(src, e => {
+      if (Date.now() - lastTT < 600) return;
+      fire(MMAP[src], e, 'mouse', e.target);
+    });
+})();
+
+/* ---------- 交互：拖拽旋转 / 滚轮缩放 / 双指捏合 / 点击涟漪 ---------- */
+function hitSeal(px, py){
+  const p = proj([seal.x, WY + 0.05, seal.z]);
+  if (!p) return false;
+  const s = 0.34*focal/p[2];
+  return Math.hypot(px - p[0], py - p[1]) < s;
+}
+function pokeSeal(){
+  if (seal.click > 0) return;
+  seal.click = 1;
+  addTapRipple(seal.x, seal.z);
+  addSplash(seal.x, seal.z, 12, WY + 0.02);
+  addTopSplash(seal.x, seal.z, WY + SEAL_Y + 0.150 + seal.bobY);
+  plip();
+}
+
+const pointers = new Map();
+let dragStart = null, pinchD = 0, pinched = false;
+cv.addEventListener('pointerdown', e => {
+  interacted = true;
+  initAudio();
+  /* 关于卡片开着的时候它吃掉所有点击：点链接 → 打开原作；点别处 → 关掉。
+     这样开着卡片时也不会顺手把相机拖走了。 */
+  if (infoOpen){
+    if (infoLinkHit(e.clientX, e.clientY)) window.open(INFO_URL, '_blank');
+    else infoOpen = false;
+    return;
+  }
+  if (hitInfo(e.clientX, e.clientY)){ infoOpen = true; return; }
+  const sw = hitSwatch(e.clientX, e.clientY);
+  if (sw >= 0){ switchTheme(sw); return; }
+  if (hitSeal(e.clientX, e.clientY)){ pokeSeal(); return; }
+  cv.setPointerCapture(e.pointerId);
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pointers.size === 1){
+    dragStart = { x: e.clientX, y: e.clientY, t: performance.now() };
+    pinched = false;
+  } else if (pointers.size === 2){
+    const ps = [...pointers.values()];
+    pinchD = Math.hypot(ps[0].x-ps[1].x, ps[0].y-ps[1].y);
+    pinched = true;
+  }
+});
+cv.addEventListener('pointermove', e => {
+  if (!pointers.size){
+    if (infoOpen){
+      const on = infoLinkHit(e.clientX, e.clientY);
+      if (on !== infoLinkOn) infoLinkOn = on;
+      const w2 = on ? 'pointer' : '';
+      if (cv.style.cursor !== w2) cv.style.cursor = w2;
+      return;
+    }
+    if (infoLinkOn) infoLinkOn = false;
+    const info = hitInfo(e.clientX, e.clientY);
+    if (info !== infoHover) infoHover = info;
+    const h = info ? -1 : hitSwatch(e.clientX, e.clientY);
+    const se = h < 0 && !info && hitSeal(e.clientX, e.clientY);
+    if (h !== hoverIdx) hoverIdx = h;
+    const want = (h >= 0 || se || info) ? 'pointer' : '';
+    if (cv.style.cursor !== want) cv.style.cursor = want;
+  }
+  if (!pointers.has(e.pointerId)) return;
+  const prev = pointers.get(e.pointerId);
+  const dx = e.clientX - prev.x, dy = e.clientY - prev.y;
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pointers.size === 1){
+    cam.theta -= dx * 0.0052;
+    cam.phi = Math.min(1.42, Math.max(0.32, cam.phi - dy * 0.0048));
+  } else if (pointers.size === 2){
+    const ps = [...pointers.values()];
+    const nd = Math.hypot(ps[0].x-ps[1].x, ps[0].y-ps[1].y);
+    if (pinchD > 0) cam.dist = Math.min(9.5, Math.max(3.2, cam.dist * pinchD/nd));
+    pinchD = nd;
+  }
+});
+function endPointer(e){
+  if (!pointers.has(e.pointerId)) return;
+  pointers.delete(e.pointerId);
+  if (dragStart && !pinched && pointers.size === 0){
+    const moved = Math.hypot(e.clientX-dragStart.x, e.clientY-dragStart.y);
+    const held = performance.now() - dragStart.t;
+    if (moved < 7 && held < 400) clickRipple(e.clientX, e.clientY);
+    dragStart = null;
+  }
+}
+cv.addEventListener('pointerup', endPointer);
+cv.addEventListener('pointercancel', endPointer);
+window.addEventListener('wheel', e => {
+  e.preventDefault();
+  if (infoOpen) return;                 // 卡片开着时不缩放场景
+  interacted = true;
+  cam.dist = Math.min(9.5, Math.max(3.2, cam.dist * Math.exp(e.deltaY * 0.0012)));
+}, { passive: false });
+window.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && infoOpen) infoOpen = false;
+});
+
+function clickRipple(px, py){
+  const nx = (px - W/2)/focal, ny = -(py - H/2)/focal;
+  const dir = norm3([ Fv[0] + Rv[0]*nx + Uv[0]*ny,
+                      Fv[1] + Rv[1]*nx + Uv[1]*ny,
+                      Fv[2] + Rv[2]*nx + Uv[2]*ny ]);
+  if (Math.abs(dir[1]) < 1e-4) return;
+  const t = (WY - eye[1]) / dir[1];
+  if (t <= 0) return;
+  const hx = eye[0] + dir[0]*t, hz = eye[2] + dir[2]*t;
+  if (Math.abs(hx) < WH && Math.abs(hz) < WH){
+    addTapRipple(hx, hz);
+    plip();
+  }
+}
+
+/* ---------- 雨声（实时合成，不内嵌音频） ---------- */
+let AC = null;
+function initAudio(){
+  if (AC){ if (AC.state === 'suspended') AC.resume(); return; }
+  try {
+    const Ctor = window.AudioContext || window.webkitAudioContext;
+    if (!Ctor) return;
+    AC = new Ctor();
+    const len = Math.floor(AC.sampleRate * 2.5);
+    const buf = AC.createBuffer(1, len, AC.sampleRate);
+    const d = buf.getChannelData(0);
+    let lp = 0;
+    for (let i = 0; i < len; i++){
+      const w = Math.random()*2 - 1;
+      lp = lp*0.87 + w*0.13;
+      d[i] = lp*0.92 + w*0.10;
+    }
+    const src = AC.createBufferSource();
+    src.buffer = buf; src.loop = true;
+    const bq = AC.createBiquadFilter();
+    bq.type = 'lowpass'; bq.frequency.value = 2400;
+    const g = AC.createGain(); g.gain.value = 0.13;
+    src.connect(bq); bq.connect(g); g.connect(AC.destination);
+    src.start();
+  } catch(err){ AC = null; }
+}
+function plip(){
+  if (!AC || AC.state !== 'running') return;
+  try {
+    const o = AC.createOscillator(), g = AC.createGain();
+    const t0 = AC.currentTime;
+    o.type = 'sine';
+    o.frequency.setValueAtTime(720, t0);
+    o.frequency.exponentialRampToValueAtTime(1480, t0 + 0.08);
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(0.06, t0 + 0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.16);
+    o.connect(g); g.connect(AC.destination);
+    o.start(t0); o.stop(t0 + 0.2);
+  } catch(err){}
+}
+
+/* ---------- 启动 ---------- */
+makePaintBlob();
+window.addEventListener('resize', resize);
+resize();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

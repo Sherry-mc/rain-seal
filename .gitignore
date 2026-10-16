@@ -1,0 +1,12 @@
+# macOS 自动生成的目录元数据
+.DS_Store
+._*
+
+# 编辑器/系统临时文件
+*.swp
+*~
+Thumbs.db
+
+# 本地调试产物（正交三视图调试图、临时截图等）
+/ortho*.html
+/dbg*.png
