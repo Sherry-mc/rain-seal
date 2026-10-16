@@ -1,2 +1,2 @@
-# shrimp-rain-simulator-seal
+# rain-seal
 🦐🦐的二创
