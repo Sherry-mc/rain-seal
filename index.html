@@ -496,7 +496,7 @@ const SV = [], SF = [];
   }
 
   /* --- 眼 / 鼻：贴在放样面上的小圆片（用 loftAt 取点，既不浮空也不陷进去） --- */
-  function disc(c, n, r, kind, hl){
+  function disc(c, n, r, kind, hl, sg){
     const a1 = norm3(cross([0,1,0], n)), a2 = cross(n, a1), v = [];
     for (let j = 0; j < 7; j++){
       const t = j/7*TAU, ct = Math.cos(t), st = Math.sin(t);
@@ -504,7 +504,9 @@ const SV = [], SF = [];
                  c[1] + (a1[1]*ct + a2[1]*st)*r,
                  c[2] + (a1[2]*ct + a2[2]*st)*r));
     }
-    SF.push({ v, kind, rr: r, hl: !!hl, ref:[c[0] - n[0]*0.05, c[1] - n[1]*0.05, c[2] - n[2]*0.05] });
+    // sg：这个贴片属于身体的哪一侧（+1 / -1）。眼睛要靠它判断"自己在近侧还是远侧"
+    SF.push({ v, kind, rr: r, hl: !!hl, sg: sg || 1,
+              ref:[c[0] - n[0]*0.05, c[1] - n[1]*0.05, c[2] - n[2]*0.05] });
   }
   /* 眼：把参考侧视图做连通域量出来的位置 —— 眼心 = (0.340, 0.550)（局部总长单位）。
      高度（y）与轴向（x）照量出来的数走，**横向（z）往里收 0.70**：
@@ -514,7 +516,7 @@ const SV = [], SF = [];
   {
     const [ep, en] = loftAt(0.352, 0.458);
     for (const sgn of [1, -1])
-      disc([ep[0], ep[1], ep[2]*0.62*sgn], norm3([en[0], en[1], en[2]*sgn]), 0.024, 'eye', true);
+      disc([ep[0], ep[1], ep[2]*0.62*sgn], norm3([en[0], en[1], en[2]*sgn]), 0.024, 'eye', true, sgn);
   }
   /* 口鼻：同一个量法得到 吻端灰块中心 ≈ (0.43, 0.50)。
      它必须长在「正前方」——侧视要看得见、正视要居中，所以不能用体表的环向角取点
@@ -727,12 +729,24 @@ function sealFaces(wx, wy, wz, h, pitch, roll, sc, projFn, vd, waterY){
     // 用常规的背面判据会时隐时现。这里改成判断「身体正前方是否朝着相机」。
     // 可见性用「面 → 相机」的真实方向判（透视下比全局视线方向准得多），
     // nv > 0 即法线朝着相机。
+    //
+    // 眼 / 鼻的可见性（2026-10-17 重写）：
+    // 原先眼睛只看贴片自己的法线，可眼睛贴在体侧、法线基本朝外横着，
+    // 人绕到背后时它的法线依然"不算背对相机"，于是两只眼睛留在后脑勺上（用户报的 bug）。
+    // 现在分两层判，并且做成**渐隐**——硬切换会"啪"地消失，很出戏：
+    //   ① fwd —— 头朝哪边：体轴正前方 · 视线方向，越接近 +1 越是背对相机；
+    //   ② lat —— 这只眼在近侧还是远侧：用该眼的横轴（局部 ±z）判。
+    //      眼是最后单独画的、不吃身体遮挡，远侧那只不掐掉会在侧视时浮在头中间。
     const nv = dot(nn, norm3(sub(eye, fc)));
-    const vis = f.kind === 'muzzle'
-      ? dot(norm3(sealXfN([1, 0, 0], 1)), vd) < 0.30
-      // 眼点的法线在正视时与视线几乎垂直，用常规背面判据会一只显一只不显
-      : (f.kind === 'eye' ? nv < 0.45 : nv > 0);
-    const it = { P, d, kind: f.kind, f, ny: nn[1], vis, nv, under, fc, wmap, wline,
+    const S01 = t => t < 0 ? 0 : (t > 1 ? 1 : t);
+    const fwd = dot(norm3(sealXfN([1, 0, 0], 1)), vd);
+    const fadeFace = S01((0.52 - fwd) / 0.30);                        // 背对相机 → 淡出
+    const fadeLat = f.kind === 'eye'
+      ? S01((0.90 - dot(sealXfN([0, 0, 1], f.sg || 1), vd)) / 0.22)   // 远侧那只 → 淡出
+      : 1;
+    const fade = Math.min(fadeFace, fadeLat);
+    const vis = (f.kind === 'eye' || f.kind === 'muzzle') ? fade > 0.02 : nv > 0;
+    const it = { P, d, kind: f.kind, f, ny: nn[1], vis, nv, fade, under, fc, wmap, wline,
                  // 水平法线指向相机 = 这一面在水线的「近侧」。
                  // 水线是一圈闭合曲线，远侧那半被身体挡着，不该画出来。
                  near: (nn[0]*vd[0] + nn[2]*vd[2]) < 0 };
@@ -972,10 +986,12 @@ function paintSealFaces(list, Pw, sc, under, fl){
     cx /= it.P.length; cy /= it.P.length;
     const rr = it.f.rr || 0.024;
     const r = Math.max(0.7, rr*SEAL_S*sc*fl/it.d);
-    ctx.fillStyle = rgbs(INK, 0.86);
+    // 渐隐系数：脸转开时眼睛跟着淡掉，而不是"啪"一下消失
+    const fa = it.fade === undefined ? 1 : it.fade;
+    ctx.fillStyle = rgbs(INK, 0.86*fa);
     ctx.beginPath(); ctx.arc(cx, cy, r, 0, TAU); ctx.fill();
     if (it.f.hl){
-      ctx.fillStyle = 'rgba(255,255,255,0.52)';
+      ctx.fillStyle = `rgba(255,255,255,${0.52*fa})`;
       ctx.beginPath(); ctx.arc(cx - r*0.32, cy - r*0.36, r*0.27, 0, TAU); ctx.fill();
     }
   }
@@ -1021,6 +1037,7 @@ function paintSealFaces(list, Pw, sc, under, fl){
 function drawFace(list, wx, wy, wz, h, pitch, roll, sc, fl){
   const face = list.find(it => it.kind === 'muzzle' && it.vis);
   if (!face) return;
+  const fa = face.fade === undefined ? 1 : face.fade;   // 头转开时口鼻一起淡掉
   let cx = 0, cy = 0;
   for (const p of face.P){ cx += p[0]; cy += p[1]; }
   cx /= face.P.length; cy /= face.P.length;
@@ -1030,12 +1047,12 @@ function drawFace(list, wx, wy, wz, h, pitch, roll, sc, fl){
   const rw = r*1.18, rh = r*0.84;
   const gcol = mixC(INK, C_GRY, 0.66);
   // 灰块本体（水彩感：两层，一层偏移一层实）
-  ctx.fillStyle = rgbs(mixC(gcol, PAPER, 0.18), 0.42);
+  ctx.fillStyle = rgbs(mixC(gcol, PAPER, 0.18), 0.42*fa);
   ctx.beginPath(); ctx.ellipse(cx + 1.0*SC, cy + 1.4*SC, rw*1.06, rh*1.08, 0, 0, TAU); ctx.fill();
-  ctx.fillStyle = rgbs(gcol, 0.78);
+  ctx.fillStyle = rgbs(gcol, 0.78*fa);
   ctx.beginPath(); ctx.ellipse(cx, cy, rw, rh, 0, 0, TAU); ctx.fill();
   // 嘴：灰块下缘一道很淡的小弧 —— 是"嘴角"不是"圈口"，别做成一圈深色描边
-  ctx.strokeStyle = rgbs(mixC(INK, C_GRY, 0.52), 0.58);
+  ctx.strokeStyle = rgbs(mixC(INK, C_GRY, 0.52), 0.58*fa);
   ctx.lineWidth = Math.max(0.8, 0.0085*SEAL_S*sc*fl/face.d);
   ctx.beginPath();
   ctx.arc(cx, cy + rh*0.42, rw*0.52, 0.20*Math.PI, 0.80*Math.PI);

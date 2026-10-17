@@ -29,6 +29,7 @@
 - `seal-in-scene.png` —— 整页真实场景 + 3 倍放大
 - `seal-font-round.png` —— 卡片字体「换前 / 换后」对照
 - `seal-info-panel.png` —— information 按钮与「关于」卡片
+- `seal-face-visibility.png` —— 眼睛/口鼻的可见性：转到背面不该露出眼睛（修复前后对照）
 - `seal-3view-current.png` —— 早期版本存档
 
 ## 灵感来源
